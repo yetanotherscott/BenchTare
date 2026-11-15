@@ -40,7 +40,7 @@ A signal has four properties:
 | --- | --- |
 | Name | Unique within the DUT. Tests refer to signals by name |
 | Type | `float`, `int`, `bool` or `enum` (with its list of values) |
-| Unit | For example `V`, `degC`, `rpm`. Optional for `bool` and `enum` |
+| Unit | For example `V`, `degC`, `rpm`. Required for `float` and `int`: write `none` for a numeric signal that has no unit, such as a count. Optional for `bool` and `enum` |
 | Direction | From the DUT's point of view: `input` (the bench drives it) or `output` (the bench reads it) |
 
 A signal has no valid range. What counts as a correct value is decided by a
@@ -82,8 +82,11 @@ so a DBC for a whole bus can be used as it is.
 An `overrides` entry can change an imported signal's `direction` or `unit`, or
 give it a new `name`. It names the signal by its DBC name, or as
 `Message.Signal` when the same name appears in more than one message. A
-numeric signal with no unit in the DBC needs one set here. Use `"1"` for a
-plain count.
+numeric signal with no unit in the DBC needs one set here, either a real unit
+or `none`.
+
+Leaving a numeric unit out is an error, so a forgotten unit is caught.
+Writing `unit: none` says on purpose that the signal has no unit.
 
 Signal names must be unique across all sources, and the error for a clash
 names both places it was defined. Names must be valid Python identifiers,

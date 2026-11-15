@@ -88,7 +88,8 @@ Get these right before writing implementations. Later stages add
 implementations without changing them.
 
 - **`Signal`** (`signals/model.py`): frozen. Name, type (`float`, `int`,
-  `bool`, `enum` with values), unit (optional for `bool` and `enum`), direction
+  `bool`, `enum` with values), unit (None when there is none; the interface
+  description requires numeric signals to declare one or `none`), direction
   (`input` or `output`, from the DUT's point of view). No range. `SignalSet`
   gives attribute access by name and enforces unique names.
 - **Interface description** (`dut/description.py`): loads one YAML file per

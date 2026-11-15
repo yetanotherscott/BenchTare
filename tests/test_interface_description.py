@@ -76,7 +76,7 @@ def test_inline_signals_only(write):
           supply_voltage: {type: float, unit: V, direction: input}
           supply_ok: {type: bool, direction: output}
           state: {type: enum, values: [idle, busy], direction: output}
-          count: {type: int, unit: 1, direction: output}
+          count: {type: int, unit: none, direction: output}
         """,
     )
     description = load_interface_description(path)
@@ -90,7 +90,7 @@ def test_inline_signals_only(write):
         Direction.INPUT,
     )
     assert description.signals.state.values == ("idle", "busy")
-    assert description.signals.count.unit == "1"
+    assert description.signals.count.unit is None
     assert description.files == (path,)
     assert description.can_signals == {}
 
@@ -161,7 +161,7 @@ def test_overrides_change_direction_unit_and_name(write):
         overrides:
           Uptime: {direction: input, unit: min}
           Diag.Mode: {name: DiagMode}
-          Counter: {unit: "1"}
+          Counter: {unit: none}
         """,
     )
     description = load_interface_description(path)
@@ -171,7 +171,7 @@ def test_overrides_change_direction_unit_and_name(write):
     assert signals.Uptime.unit == "min"
     assert signals.DiagMode.unit == "x"
     assert signals.Mode.type is SignalType.ENUM  # the original Mode is untouched
-    assert signals.Counter.unit == "1"
+    assert signals.Counter.unit is None
     # A renamed signal still knows its name in the DBC.
     assert description.can_signals["DiagMode"].signal == "Mode"
 
@@ -207,7 +207,7 @@ def test_duplicate_name_across_dbc_files_suggests_rename(write):
         dut: reference
         can: {node: REFDEV, dbc: [ref.dbc, extra.dbc]}
         overrides:
-          Counter: {unit: "1"}
+          Counter: {unit: none}
         """,
     )
     with pytest.raises(ConfigError) as info:
@@ -229,7 +229,50 @@ def test_unknown_type_is_rejected(write):
 
 def test_inline_numeric_signal_without_unit_is_rejected(write):
     path = write("dut.yaml", "dut: x\nsignals:\n  v: {type: float, direction: input}\n")
-    with pytest.raises(ConfigError, match="signal 'v'.*float signal has no unit"):
+    with pytest.raises(ConfigError, match=r"signal 'v'.*float signal has no unit[\s\S]*unit: none"):
+        load_interface_description(path)
+
+
+@pytest.mark.parametrize("unit", ["none", "None", "NONE"])
+def test_unit_none_declares_a_unitless_numeric_signal(write, unit):
+    path = write(
+        "dut.yaml", f"dut: x\nsignals:\n  n: {{type: int, unit: {unit}, direction: output}}\n"
+    )
+    assert load_interface_description(path).signals.n.unit is None
+
+
+@pytest.mark.parametrize("unit", ["null", "~", "''"])
+def test_empty_unit_counts_as_missing(write, unit):
+    # 'unit: null' is not a declaration that there is no unit; only 'unit: none' is.
+    path = write(
+        "dut.yaml", f"dut: x\nsignals:\n  n: {{type: int, unit: {unit}, direction: output}}\n"
+    )
+    with pytest.raises(ConfigError, match="signal 'n'"):
+        load_interface_description(path)
+
+
+def test_bool_and_enum_may_say_unit_none(write):
+    path = write(
+        "dut.yaml",
+        """\
+        dut: x
+        signals:
+          b: {type: bool, unit: none, direction: input}
+          e: {type: enum, values: [a, b], unit: none, direction: input}
+        """,
+    )
+    signals = load_interface_description(path).signals
+    assert signals.b.unit is None
+    assert signals.e.unit is None
+
+
+def test_override_unit_needs_a_value(write):
+    write("extra.dbc", DBC_EXTRA)
+    path = write(
+        "dut.yaml",
+        "dut: x\ncan: {node: REFDEV, dbc: extra.dbc}\noverrides:\n  Counter: {unit: null}\n",
+    )
+    with pytest.raises(ConfigError, match="'unit:' has no value; give a unit, or none"):
         load_interface_description(path)
 
 
@@ -240,7 +283,7 @@ def test_dbc_signal_without_unit_hints_at_overrides(write):
         load_interface_description(path)
     (problem,) = problems_of(info)
     assert "signal 'Counter' (extra.dbc, message Diag)" in problem
-    assert 'Diag.Counter: {unit: "1"}' in problem
+    assert "Diag.Counter: {unit: none}" in problem
 
 
 def test_all_problems_are_reported_together(write):

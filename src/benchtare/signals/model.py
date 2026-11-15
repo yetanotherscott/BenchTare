@@ -49,12 +49,15 @@ class Direction(str, Enum):
     OUTPUT = "output"  # the bench reads it
 
 
-_NEEDS_UNIT = {SignalType.FLOAT, SignalType.INT}
+NUMERIC_TYPES = frozenset({SignalType.FLOAT, SignalType.INT})
 
 
 @dataclass(frozen=True)
 class Signal:
     """A named value on the DUT.
+
+    ``unit`` is None for a signal with no unit. The interface description makes every numeric
+    signal declare its unit, or ``none``, so that a forgotten unit is caught there.
 
     ``source`` says where the signal was defined, for error messages, for example
     ``"reference.dbc, message Status"``.
@@ -79,12 +82,9 @@ class Signal:
                 signal=self.name,
                 field="direction",
             )
-        if self.type in _NEEDS_UNIT and not self.unit:
+        if self.unit is not None and (not isinstance(self.unit, str) or not self.unit.strip()):
             raise SignalError(
-                f"{self.type.value} signal has no unit",
-                signal=self.name,
-                field="unit",
-                hint='give it a unit, for example "V" or "degC"; use "1" for a plain count',
+                f"unit must be text or None, got {self.unit!r}", signal=self.name, field="unit"
             )
         if self.type is SignalType.ENUM:
             if not self.values:

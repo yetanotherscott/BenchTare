@@ -25,9 +25,15 @@ class TestSignal:
             make().unit = "V"
 
     @pytest.mark.parametrize("signal_type", [SignalType.FLOAT, SignalType.INT])
-    def test_numeric_signal_without_unit_is_rejected(self, signal_type):
-        with pytest.raises(SignalError, match="has no unit") as info:
-            make(type=signal_type, unit=None)
+    def test_numeric_signal_may_have_no_unit(self, signal_type):
+        # The interface description makes the author say so with 'unit: none'; a Signal just
+        # records that there is none.
+        assert make(type=signal_type, unit=None).unit is None
+
+    @pytest.mark.parametrize("unit", ["", "  ", 5])
+    def test_blank_or_non_text_unit_is_rejected(self, unit):
+        with pytest.raises(SignalError, match="unit must be text or None") as info:
+            make(unit=unit)
         assert info.value.field == "unit"
         assert info.value.signal == "Setpoint"
 

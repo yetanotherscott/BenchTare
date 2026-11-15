@@ -8,9 +8,12 @@ Signals can be listed directly, imported from DBC files, or both. See docs/model
       dbc: [reference.dbc]
     signals:
       supply_enable: {type: bool, direction: input}
+      boot_count: {type: int, unit: none, direction: output}
     overrides:
       Setpoint: {unit: degC}  # adjust an imported signal
     standards: []             # reserved; no standard is available yet
+
+Numeric signals must declare a unit. ``unit: none`` says a signal deliberately has none.
 """
 
 from __future__ import annotations
@@ -27,9 +30,19 @@ import cantools
 
 from benchtare._yaml import read_mapping
 from benchtare.errors import ConfigError, Problem
-from benchtare.signals.model import Direction, Signal, SignalError, SignalSet, SignalType
+from benchtare.signals.model import (
+    NUMERIC_TYPES,
+    Direction,
+    Signal,
+    SignalError,
+    SignalSet,
+    SignalType,
+)
 
 KIND = "interface description"
+
+# The unit to write for a numeric signal that has no unit.
+NO_UNIT = "none"
 
 _TOP_KEYS = ("dut", "can", "signals", "overrides", "standards")
 _CAN_KEYS = ("node", "dbc")
@@ -75,6 +88,7 @@ class _Candidate:
     values: tuple[str, ...]
     where: str
     can_ref: CanSignalRef | None = None
+    unit_declared: bool = False  # a unit was given, possibly 'none'
 
     @property
     def qualified(self) -> str | None:
@@ -256,12 +270,14 @@ def _import_dbc(
                 skipped[qualified] = f"{dbc_path.name}, message {message.name}"
                 continue
             signal_type, values = _dbc_type(dbc_signal)
+            dbc_unit = (dbc_signal.unit or "").strip()
             candidates.append(
                 _Candidate(
                     name=dbc_signal.name,
                     type=signal_type,
                     direction=direction,
-                    unit=dbc_signal.unit or None,
+                    unit=None if dbc_unit.lower() in ("", NO_UNIT) else dbc_unit,
+                    unit_declared=bool(dbc_unit),
                     values=values,
                     where=f"{dbc_path.name}, message {message.name}",
                     can_ref=CanSignalRef(
@@ -329,7 +345,7 @@ def _load_inline(
                 )
         signal_type = _parse_type(spec.get("type"), str(name), where, problems)
         direction = _parse_direction(spec.get("direction"), str(name), where, problems)
-        unit = _parse_unit(spec.get("unit"), str(name), where, problems)
+        unit, unit_declared = _parse_unit(spec.get("unit"), str(name), where, problems)
         values = _parse_values(spec.get("values"), str(name), where, problems)
         if len(problems) == before:
             candidates.append(
@@ -338,6 +354,7 @@ def _load_inline(
                     type=signal_type,
                     direction=direction,
                     unit=unit,
+                    unit_declared=unit_declared,
                     values=values,
                     where=where,
                 )
@@ -377,13 +394,25 @@ def _parse_direction(
         return None
 
 
-def _parse_unit(raw: Any, name: str, where: str, problems: list[Problem]) -> str | None:
+def _parse_unit(
+    raw: Any, name: str, where: str, problems: list[Problem]
+) -> tuple[str | None, bool]:
+    """Return (unit, declared). ``unit: none`` declares that a signal has no unit."""
     if raw is None:
-        return None
-    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
-        problems.append(Problem("unit must be text, for example unit: V", signal=name, where=where))
-        return None
-    return str(raw)
+        return None, False
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)) or not str(raw).strip():
+        problems.append(
+            Problem(
+                f"unit must be text, for example unit: V, or unit: {NO_UNIT} if it has none",
+                signal=name,
+                where=where,
+            )
+        )
+        return None, True  # reported here, so don't report it again as missing
+    text = str(raw).strip()
+    if text.lower() == NO_UNIT:
+        return None, True
+    return text, True
 
 
 def _parse_values(raw: Any, name: str, where: str, problems: list[Problem]) -> tuple[str, ...]:
@@ -465,7 +494,17 @@ def _apply_overrides(
             else:
                 target.name = new_name
         if "unit" in spec:
-            target.unit = _parse_unit(spec["unit"], key, where, problems)
+            unit, declared = _parse_unit(spec["unit"], key, where, problems)
+            if declared:
+                target.unit, target.unit_declared = unit, True
+            else:
+                problems.append(
+                    Problem(
+                        f"'unit:' has no value; give a unit, or {NO_UNIT} if it has none",
+                        signal=key,
+                        where=where,
+                    )
+                )
         if "direction" in spec:
             direction = _parse_direction(spec["direction"], key, where, problems, required=False)
             if direction is not None:
@@ -549,6 +588,9 @@ def _build_signals(candidates: list[_Candidate], problems: list[Problem]) -> lis
         by_name[candidate.name] = candidate
         if candidate.type is None or candidate.direction is None:
             continue  # already reported
+        if candidate.type in NUMERIC_TYPES and not candidate.unit_declared:
+            problems.append(_missing_unit_problem(candidate))
+            continue
         try:
             signals.append(
                 Signal(
@@ -572,14 +614,26 @@ def _build_signals(candidates: list[_Candidate], problems: list[Problem]) -> lis
     return signals
 
 
+def _missing_unit_problem(candidate: _Candidate) -> Problem:
+    assert candidate.type is not None
+    if candidate.can_ref is None:
+        hint = f"add a unit, for example unit: V, or unit: {NO_UNIT} if it has none"
+    else:
+        hint = (
+            "the DBC gives no unit; set one in overrides, for example  "
+            f"{candidate.qualified}: {{unit: {NO_UNIT}}}  or  {{unit: V}}"
+        )
+    return Problem(
+        f"{candidate.type.value} signal has no unit",
+        signal=str(candidate.name),
+        where=candidate.where,
+        hint=hint,
+    )
+
+
 def _hint_for(candidate: _Candidate, exc: SignalError) -> str | None:
     if candidate.can_ref is None:
         return exc.hint
-    if exc.field == "unit":
-        return (
-            f"the DBC gives no unit; set one in overrides, for example  "
-            f'{candidate.qualified}: {{unit: "1"}}  for a plain count'
-        )
     if exc.field == "name":
         return f"rename it in overrides, for example  {candidate.qualified}: {{name: NewName}}"
     return exc.hint
