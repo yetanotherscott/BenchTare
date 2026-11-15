@@ -10,3 +10,10 @@ can:
 signals:
   supply_enable: {type: bool, direction: input}
   supply_ok: {type: bool, direction: output}
+
+overrides:
+  SwVersion: {unit: none}
+
+# What each run records about the DUT. Names only: the values are collected during the run.
+identity:
+  software: {signal: SwVersion}

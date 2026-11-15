@@ -1,4 +1,4 @@
-# A simulated bench: a virtual CAN interface, and simulated I/O with four outputs and four
+# A simulated bench: a virtual CAN interface, and simulated I/O with four outputs and five
 # inputs. It names no DUT signals, so it works with either reference harness.
 
 bench: laptop-sim
@@ -17,3 +17,4 @@ equipment:
       in2: {read: true}
       in3: {read: true}
       in4: {read: true}
+      in5: {read: true}

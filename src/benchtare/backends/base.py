@@ -19,7 +19,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from benchtare.dut.description import CanSignalRef
@@ -94,6 +94,20 @@ class Receiver(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class EquipmentIdentity:
+    """What a backend can tell about its equipment, stored with each run's results. Anything it
+    can't tell stays None. A simulated backend leaves the hardware fields empty."""
+
+    vendor: str | None = None
+    model: str | None = None
+    serial_number: str | None = None
+    firmware_version: str | None = None
+    driver: str | None = None
+    driver_version: str | None = None
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+
 @runtime_checkable
 class Backend(Protocol):
     """Drives one item of bench equipment. See the module docstring."""
@@ -110,6 +124,11 @@ class Backend(Protocol):
 
     def write(self, binding: Binding, value: Any) -> None:
         """Drive a value. Raise ``WriteError`` if the channel can't carry it."""
+        ...
+
+    def identity(self) -> EquipmentIdentity:
+        """The equipment's vendor, model, serial number, firmware and driver, as far as it can
+        report them. Called once the backend is open."""
         ...
 
 

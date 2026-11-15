@@ -10,6 +10,7 @@ connections:
   Measured: io.in1
   Mode: io.in2
   supply_ok: io.in3
+  SwVersion: io.in5
 
 loopbacks:
   - {drive: io.out4, read: io.in4}

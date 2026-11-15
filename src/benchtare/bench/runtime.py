@@ -22,6 +22,7 @@ import logging
 import math
 import numbers
 import os
+import threading
 import time
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
@@ -31,6 +32,7 @@ from benchtare.backends.base import (
     Backend,
     BenchError,
     Binding,
+    EquipmentIdentity,
     ReadTimeout,
     ReceiveBuffer,
     Received,
@@ -38,8 +40,18 @@ from benchtare.backends.base import (
 )
 from benchtare.bench.config import BenchConfig, load_bench_file
 from benchtare.dut.description import InterfaceDescription, load_interface_description
+from benchtare.dut.identity import CODE, SIGNAL, IdentityValue, name_problem
 from benchtare.harness.config import HarnessConfig, load_harness_file
-from benchtare.record import DEFAULT_LEVEL, READ, WAIT, WRITE, RecordEntry, RecordLevel
+from benchtare.record import (
+    DEFAULT_LEVEL,
+    IDENTIFY,
+    IDENTITY_CHANGE,
+    READ,
+    WAIT,
+    WRITE,
+    RecordEntry,
+    RecordLevel,
+)
 from benchtare.signals.model import Direction, Signal, SignalSet, SignalType
 from benchtare.sim.simulation import Simulation
 
@@ -49,6 +61,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 1.0
+
+_IDENTITY_FIELDS = (
+    "vendor",
+    "model",
+    "serial_number",
+    "firmware_version",
+    "driver",
+    "driver_version",
+)
 
 # The key under which Bench.check() lists the simulation's own problems. It has a space, so it
 # can never be an equipment name.
@@ -97,6 +118,12 @@ class Bench:
         self._record_level = DEFAULT_LEVEL
         self._buffer.note_level = DEFAULT_LEVEL
         self._buffer.on_note = self._note
+        # The DUT's identity for the run: latest value by name, every value in order, and why
+        # an expected item couldn't be read.
+        self._identity_lock = threading.Lock()
+        self._identity: dict[str, str] = {}
+        self._identity_values: list[IdentityValue] = []
+        self._identity_notes: dict[str, str] = {}
 
     @property
     def record_level(self) -> RecordLevel:
@@ -293,11 +320,132 @@ class Bench:
         )
         return item.value
 
+    # --- the DUT's identity -----------------------------------------------------------------
+
+    def identify(self, item: str | Mapping[str, Any], value: Any = None) -> None:
+        """Record part of the DUT's identity for this run, such as a software version:
+        ``bench.identify("bootloader", "1.4.2")``, or several at once with a mapping.
+
+        Any name can be given, such as ``motor.firmware`` for a subsystem; the interface
+        description's ``identity:`` lists the ones every run should have. The value is stored
+        as text, and belongs to the whole run. Giving the same value again changes nothing; a
+        different value is kept as well, and recorded as an unexpected change.
+        """
+        __tracebackhide__ = True
+        values = dict(item) if isinstance(item, Mapping) else {item: value}
+        for name, val in values.items():
+            self.collect_identity(name, val, CODE)
+
+    @property
+    def identity(self) -> dict[str, str]:
+        """The DUT's identity collected so far: each item's latest value, by name."""
+        with self._identity_lock:
+            return dict(self._identity)
+
+    def identity_values(self) -> list[IdentityValue]:
+        """Every identity value collected so far, in order, with where it came from."""
+        with self._identity_lock:
+            return list(self._identity_values)
+
+    def missing_identity(self) -> dict[str, str]:
+        """The listed identity items with no value yet, each with why, if that is known."""
+        with self._identity_lock:
+            return {
+                name: self._identity_notes.get(name, "")
+                for name in self.description.identity
+                if name not in self._identity
+            }
+
+    def read_identity(self) -> None:
+        """Read each listed identity item that names a DUT output. Run before the first test."""
+        for item in self.description.identity.values():
+            if item.signal is None or item.name in self.identity:
+                continue
+            if item.signal not in self._bindings:
+                note = f"its signal {item.signal} isn't connected in harness file "
+                with self._identity_lock:
+                    self._identity_notes[item.name] = note + self.harness.path.name
+                continue
+            received = self.seen(item.signal, item.within)
+            if received is None:
+                with self._identity_lock:
+                    self._identity_notes[item.name] = (
+                        f"no value of {item.signal} arrived within {item.within:g} s"
+                    )
+                continue
+            self.collect_identity(item.name, received.value, SIGNAL, signal=item.signal)
+
+    def collect_identity(
+        self, name: str, value: Any, source: str, *, signal: str | None = None
+    ) -> None:
+        """Record one identity value from ``source`` (see ``benchtare.dut.identity``)."""
+        __tracebackhide__ = True
+        problem = name_problem(name)
+        if problem:
+            raise BenchError(problem, hint="for example  bench.identify('bootloader', '1.4.2')")
+        if value is None:
+            raise BenchError(
+                f"identity item '{name}' needs a value",
+                hint=f"for example  bench.identify('{name}', '1.4.2')",
+            )
+        text = str(value)
+        with self._identity_lock:
+            previous = self._identity.get(name)
+            if previous == text:
+                return
+            self._identity[name] = text
+            self._identity_values.append(
+                IdentityValue(name, text, source, name in self.description.identity, time.time())
+            )
+        origin = {"signal": f"signal {signal}", "code": "the team's code"}.get(
+            source, "the command line"
+        )
+        facts = {"item": name, "value": text, "source": source}
+        if signal is not None:
+            facts["signal"] = signal
+        self._note(
+            RecordEntry(
+                IDENTIFY, RecordLevel.RESULTS, f"identify {name} = {text!r} (from {origin})", facts
+            )
+        )
+        if previous is not None:
+            self._note(
+                RecordEntry(
+                    IDENTITY_CHANGE,
+                    RecordLevel.RESULTS,
+                    f"the DUT's {name} changed during the run: it was {previous!r}, and is now "
+                    f"{text!r} (from {origin})",
+                    {"item": name, "was": previous, "value": text, "source": source},
+                )
+            )
+
     # --- for the self-test ------------------------------------------------------------------
 
     def backend(self, equipment: str) -> Backend:
         """The backend that drives an equipment item."""
         return self._backends[equipment]
+
+    def equipment(self) -> list[dict[str, Any]]:
+        """Each equipment item as its backend describes it, for the run's results."""
+        items = []
+        for item in self.config.equipment.values():
+            try:
+                identity = self._backends[item.id].identity()
+            except Exception as exc:  # noqa: BLE001 - a backend that can't describe itself is noted, not fatal
+                identity = EquipmentIdentity(
+                    details={"identity_error": f"{type(exc).__name__}: {exc}"}
+                )
+            items.append(
+                {
+                    "equipment": item.id,
+                    "backend": item.backend,
+                    "kind": item.kind,
+                    "simulated": item.simulated,
+                    **{key: getattr(identity, key) for key in _IDENTITY_FIELDS},
+                    "details": dict(identity.details),
+                }
+            )
+        return items
 
     def drive_channel(self, endpoint: str, value: Any) -> None:
         """Drive a bench channel that carries no signal, such as a loopback's drive end."""

@@ -49,7 +49,8 @@ benchtare/
 │   ├── signals/
 │   │   └── model.py         # Signal and SignalSet
 │   ├── dut/
-│   │   └── description.py   # interface description: inline signals, DBC imports
+│   │   ├── description.py   # interface description: inline signals, DBC imports
+│   │   └── identity.py      # the DUT's identity: expected items and collected values
 │   ├── errors.py            # ConfigError and Problem: what failed, where, what to check
 │   ├── bench/
 │   │   ├── config.py        # bench file: equipment, backends, channels
@@ -126,9 +127,12 @@ implementations without changing them.
   - When the harness says `simulate:`, it starts the `Simulation`
     (`sim/simulation.py`), which wires the simulated DUT to the simulated
     equipment.
-- **`ResultStore`** (`results/store.py`): `start_run(manifest)`,
-  `record(test_id, outcome, test_record, requirement_ids)`, `finish_run()`.
-  SQLite is the only implementation in this slice.
+- **`ResultStore`** (`results/store.py`): `start_run`, then `add_environment`,
+  `add_manifest_files`, `add_equipment`, `add_selftest`, `add_test`,
+  `add_record` and `add_identity` as the run goes, and `finish_run`. SQLite is
+  the only implementation in this slice. M8 adds requirement IDs.
+- **`Backend.identity()`**: the equipment's vendor, model, serial number,
+  firmware and driver, as far as the backend can tell.
 
 ## Order of work
 
@@ -260,10 +264,16 @@ Each milestone ends with passing tests and a commit. Do them in order.
   each caught; no tests run after a failure; the self-test doesn't run when no
   test uses the bench or when only collecting; the CLI exit codes are right.
 
-### M5: Results and manifest
+### M5: Results and manifest (done)
 
-The schema is set out in [results-schema.md](results-schema.md); build version
-1 from it.
+Built from [results-schema.md](results-schema.md), version 1. Results go to
+`results/schema.py` (creating, refusing and migrating the database),
+`results/manifest.py` (file hashes, git state, environment, packages) and
+`results/store.py` (`ResultStore` and `SQLiteStore`). DUT identity is in
+`dut/identity.py`, `Bench.identify`, `Bench.read_identity`, and the
+interface description's `identity:`. The reference DUT now reports
+`SwVersion` (102) and lists it as its `software` identity item; the simulated
+bench gained a fifth input, `io.in5`, so the IO harness carries it too.
 
 - Results schema with a schema version from day one (`PRAGMA user_version`
   plus a `schema_version` column). A database newer than the code is refused

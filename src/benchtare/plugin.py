@@ -35,35 +35,70 @@ Two records, each with its own verbosity:
   with pytest's usual options (``--log-level``, ``--log-cli-level``, ``log_file_level``). The
   files are loaded at session start rather than in ``pytest_configure`` so that pytest's live
   log and log file capture the loading.
+
+Results: every run is stored in the results database (``benchtare.results``), at
+``.benchtare/results.sqlite3`` under pytest's rootdir unless ``--results`` or
+``benchtare_results`` says otherwise, and not at all with ``--no-results``. A run is written as
+it goes: when it starts, before the first test (manifest, equipment, self-test, DUT identity),
+after each test, and when it ends. ``--identify NAME=VALUE`` adds to the DUT's identity.
 """
 
 from __future__ import annotations
 
+import difflib
 import threading
+import time
+import uuid
 import warnings
-from collections.abc import Callable, Generator, Sequence
+from collections import Counter
+from collections.abc import Callable, Generator, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from benchtare import __version__
 from benchtare._yaml import count
 from benchtare.bench.config import BenchConfig, load_bench_file
 from benchtare.bench.runtime import Bench
 from benchtare.dut.description import InterfaceDescription, load_interface_description
-from benchtare.errors import BenchTareError, ConfigError, EquipmentWarning, FrameMismatchWarning
+from benchtare.dut.identity import COMMAND_LINE, MISSING, IdentityValue, name_problem
+from benchtare.errors import (
+    BenchTareError,
+    ConfigError,
+    DutIdentityWarning,
+    EquipmentWarning,
+    FrameMismatchWarning,
+)
 from benchtare.harness.config import HarnessConfig, load_harness_file
 from benchtare.record import (
     ASSERT,
     DEFAULT_LEVEL,
     EQUIPMENT_FAILURE,
     FRAME_MISMATCH,
+    IDENTITY_CHANGE,
     LEVEL_NAMES,
     RESULT,
     RecordEntry,
     RecordLevel,
     render,
 )
+from benchtare.results.manifest import (
+    BENCH,
+    CONFTEST,
+    DBC,
+    HARNESS,
+    INI,
+    INTERFACE,
+    TEST,
+    environment,
+    git_state,
+    manifest_files,
+    packages,
+    shown_path,
+)
+from benchtare.results.schema import ResultsError
+from benchtare.results.store import FINISHED, STOPPED, RunInfo, SQLiteStore, TestResult
 from benchtare.selftest import SelfTestResult, could_not_open, run_selftest
 from benchtare.signals.model import SignalSet
 
@@ -78,8 +113,24 @@ SESSION_PLUGIN = "benchtare-session"
 PHASES = ("setup", "call", "teardown")
 
 _RECORD = pytest.StashKey[dict[str, list[RecordEntry]]]()
+_REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
+_STARTED = pytest.StashKey[float]()
 _PATHS = pytest.StashKey[dict[str, Path]]()
 _LEVEL = pytest.StashKey[RecordLevel]()
+_RESULTS = pytest.StashKey["Path | None"]()
+_IDENTIFY = pytest.StashKey[list[tuple[str, str]]]()
+
+DEFAULT_RESULTS = Path(".benchtare") / "results.sqlite3"
+
+# How pytest's outcomes are counted in a run's totals.
+_COUNTED_AS = {
+    "passed": "passed",
+    "xpassed": "passed",
+    "failed": "failed",
+    "error": "errors",
+    "skipped": "skipped",
+    "xfailed": "skipped",
+}
 
 NOT_CONFIGURED = (
     "this test uses BenchTare's '{fixture}' fixture, but BenchTare isn't configured\n"
@@ -114,6 +165,31 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addini(
         "benchtare_record",
         f"BenchTare: test record level ({', '.join(LEVEL_NAMES)}); default {DEFAULT_LEVEL.label}",
+    )
+    group.addoption(
+        "--results",
+        dest="benchtare_results",
+        metavar="PATH",
+        default=None,
+        help=f"the results database, relative to where pytest is run. Default: {DEFAULT_RESULTS} "
+        "under pytest's rootdir",
+    )
+    parser.addini("benchtare_results", "BenchTare: the results database, relative to this ini file")
+    group.addoption(
+        "--no-results",
+        dest="benchtare_no_results",
+        action="store_true",
+        default=False,
+        help="don't store this run in the results database",
+    )
+    group.addoption(
+        "--identify",
+        dest="benchtare_identify",
+        metavar="NAME=VALUE",
+        action="append",
+        default=[],
+        help="part of the DUT's identity for this run, such as --identify hardware_revision=C; "
+        "repeat it for more",
     )
     group.addoption(
         "--selftest-only",
@@ -163,6 +239,37 @@ def configured_level(config: pytest.Config) -> RecordLevel:
         ) from None
 
 
+def configured_results(config: pytest.Config) -> Path | None:
+    """Where this run's results go, or None if they aren't stored."""
+    if config.getoption("benchtare_no_results") or config.option.collectonly:
+        return None
+    cli = config.getoption("benchtare_results")
+    if cli:
+        return Path(config.invocation_params.dir) / Path(cli).expanduser()
+    ini = config.getini("benchtare_results")
+    if ini:
+        base = config.inipath.parent if config.inipath else config.rootpath
+        return base / Path(str(ini)).expanduser()
+    return config.rootpath / DEFAULT_RESULTS
+
+
+def configured_identity(config: pytest.Config) -> list[tuple[str, str]]:
+    """The --identify NAME=VALUE options, checked."""
+    values = []
+    for given in config.getoption("benchtare_identify"):
+        name, equals, value = str(given).partition("=")
+        problem = name_problem(name.strip()) if equals else "it needs NAME=VALUE"
+        if not problem and not value:
+            problem = f"'{name.strip()}' needs a value after the ="
+        if problem:
+            raise pytest.UsageError(
+                f"BenchTare: --identify {given}: {problem}. Check: for example "
+                "--identify hardware_revision=C"
+            )
+        values.append((name.strip(), value))
+    return values
+
+
 def pytest_configure(config: pytest.Config) -> None:
     paths = configured_paths(config)
     if paths is None:
@@ -174,6 +281,8 @@ def pytest_configure(config: pytest.Config) -> None:
         return
     config.stash[_PATHS] = paths
     config.stash[_LEVEL] = configured_level(config)
+    config.stash[_RESULTS] = configured_results(config)
+    config.stash[_IDENTIFY] = configured_identity(config)
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -187,12 +296,18 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         harness = load_harness_file(paths["harness"], description, bench_config)
     except ConfigError as exc:
         raise pytest.UsageError(f"BenchTare can't start.\n{exc}") from None
-    level = session.config.stash[_LEVEL]
-    selftest_only = bool(session.config.getoption("benchtare_selftest_only"))
-    session.config.pluginmanager.register(
-        BenchSession(description, bench_config, harness, level, selftest_only=selftest_only),
-        SESSION_PLUGIN,
+    config = session.config
+    bench_session = BenchSession(
+        description,
+        bench_config,
+        harness,
+        config.stash[_LEVEL],
+        selftest_only=bool(config.getoption("benchtare_selftest_only")),
+        results=config.stash[_RESULTS],
+        identify=config.stash[_IDENTIFY],
     )
+    bench_session.start_run(config)
+    config.pluginmanager.register(bench_session, SESSION_PLUGIN)
 
 
 # --- fixtures ------------------------------------------------------------------------------------
@@ -221,8 +336,8 @@ def _session(request: pytest.FixtureRequest, fixture: str) -> BenchSession:
 
 
 class BenchSession:
-    """Registered as a plugin only when BenchTare is configured. Owns the bench for the run, and
-    keeps each test's record."""
+    """Registered as a plugin only when BenchTare is configured. Owns the bench for the run,
+    keeps each test's record, and stores the run in the results database."""
 
     def __init__(
         self,
@@ -232,6 +347,8 @@ class BenchSession:
         level: RecordLevel = DEFAULT_LEVEL,
         *,
         selftest_only: bool = False,
+        results: Path | None = None,
+        identify: Sequence[tuple[str, str]] = (),
     ) -> None:
         self.description = description
         self.bench_config = bench
@@ -239,27 +356,133 @@ class BenchSession:
         self.level = level
         self.selftest_only = selftest_only
         self.bench: Bench | None = None
-        self.selftest: SelfTestResult | None = None  # kept for the results (M5)
-        self.selftest_record: list[RecordEntry] = []
+        self.selftest: SelfTestResult | None = None
+        self.pretest_record: list[RecordEntry] = []
         self._open_error: str | None = None
+        self._identify = list(identify)  # from the command line
+        self._identity_read = False  # listed identity signals have been read
         # Entries arrive from receive threads as well as from the test, so all of this is
         # guarded by the lock.
         self._lock = threading.Lock()
         self._item: pytest.Item | None = None
         self._phase: str | None = None
         self._pending: list[RecordEntry] = []  # arrived between phases: they go to the next one
-        self._in_selftest = False  # entries then go to the self-test's record
+        self._in_pretest = False  # entries then go to the record before the first test
         self._after_last_test: list[RecordEntry] = []
+        # The results database: None when this run isn't stored.
+        self.results_path = results
+        self.store: SQLiteStore | None = None
+        self.run_id: str | None = None
+        self._started = time.time()
+        self._test_seq = 0
+        self._counts: Counter[str] = Counter()
+        self._identity_stored = 0  # how many of the bench's identity values are stored
+        self._manifest_stored = False
+
+    # --- the run in the results database --------------------------------------------------
+
+    def start_run(self, config: pytest.Config) -> None:
+        """Open the results database and store the run's start. Called at session start."""
+        if self.results_path is None:
+            return
+        try:
+            self.store = SQLiteStore(self.results_path)
+        except ResultsError as exc:
+            raise pytest.UsageError(f"BenchTare can't store results.\n{exc}") from None
+        self.run_id = str(uuid.uuid4())
+        commit, dirty = git_state(config.rootpath)
+        self.store.start_run(
+            RunInfo(
+                id=self.run_id,
+                kind="selftest" if self.selftest_only else "tests",
+                started_at=self._started,
+                record_level=self.level.label,
+                dut=self.description.name,
+                bench=self.bench_config.name,
+                harness=self.harness.name,
+                simulated_dut=self.harness.simulate,
+                benchtare_version=__version__,
+                pytest_version=pytest.__version__,
+                args=[str(arg) for arg in config.invocation_params.args],
+                git_commit=commit,
+                git_dirty=dirty,
+            )
+        )
+        self.store.add_environment(self.run_id, environment(), packages())
+
+    def _store_manifest(self, session: pytest.Session) -> None:
+        if self.store is None or self.run_id is None or self._manifest_stored:
+            return
+        self._manifest_stored = True
+        config = session.config
+        files: list[tuple[Path, str]] = [(self.description.path, INTERFACE)]
+        files += [(dbc, DBC) for dbc in self.description.dbc_files]
+        files += [(self.bench_config.path, BENCH), (self.harness.path, HARNESS)]
+        if config.inipath is not None:
+            files.append((Path(config.inipath), INI))
+        files += [(path, CONFTEST) for path in _conftest_files(config)]
+        files += [(Path(item.path), TEST) for item in session.items]
+        self.store.add_manifest_files(self.run_id, manifest_files(config.rootpath, files))
+
+    def _store_identity(self) -> None:
+        """Store the identity values collected since last time."""
+        if self.store is None or self.run_id is None or self.bench is None:
+            return
+        values = self.bench.identity_values()
+        self.store.add_identity(self.run_id, values[self._identity_stored :])
+        self._identity_stored = len(values)
+
+    def _store_test(self, item: pytest.Item) -> None:
+        reports = item.stash.get(_REPORTS, {})
+        outcome, main = _outcome(reports)
+        self._counts[_COUNTED_AS[outcome]] += 1
+        if self.store is None or self.run_id is None:
+            return
+        self._test_seq += 1
+        details = main.longreprtext if main is not None and not main.passed else ""
+        teardown = reports.get("teardown")
+        if teardown is not None and teardown.failed and teardown is not main:
+            details += f"\n\nTeardown also failed:\n{teardown.longreprtext}"
+        last = teardown or main
+        self.store.add_test(
+            self.run_id,
+            TestResult(
+                seq=self._test_seq,
+                nodeid=item.nodeid,
+                file=shown_path(Path(item.path), item.config.rootpath),
+                outcome=outcome,
+                started_at=item.stash.get(_STARTED, time.time()),
+                message=_short_message(main) if main is not None else None,
+                details=details.strip() or None,
+                durations={when: report.duration for when, report in reports.items()},
+                properties=list(last.user_properties) if last is not None else [],
+            ),
+        )
+        with self._lock:
+            records = {
+                phase: list(entries) for phase, entries in item.stash.get(_RECORD, {}).items()
+            }
+        for phase in PHASES:
+            self.store.add_record(
+                self.run_id, records.get(phase, []), phase=phase, test_seq=self._test_seq
+            )
+        self._store_identity()
+
+    # --- the bench --------------------------------------------------------------------------
 
     def open_bench(self) -> Bench:
         """The open bench, for the ``bench`` fixture. Fails the test if it can't be opened."""
         if self._open_error is not None:
             pytest.fail(self._open_error, pytrace=False)
         try:
-            return self._open()
+            bench = self._open()
         except BenchTareError as exc:
             self._open_error = f"BenchTare couldn't open the bench.\n{exc}"
             pytest.fail(self._open_error, pytrace=False)
+        if not self._identity_read:  # opened without the self-test: read the identity now
+            self._identity_read = True
+            bench.read_identity()
+        return bench
 
     def _open(self) -> Bench:
         if self.bench is None:
@@ -268,21 +491,26 @@ class BenchSession:
             bench.recorder = self._record
             bench.open()
             self.bench = bench
+            if self.store is not None and self.run_id is not None:
+                self.store.add_equipment(self.run_id, bench.equipment())
+            for name, value in self._identify:
+                bench.collect_identity(name, value, COMMAND_LINE)
         return self.bench
 
     def _record(self, entry: RecordEntry) -> None:
         with self._lock:
-            if self._in_selftest:
-                self.selftest_record.append(entry)
+            if self._in_pretest:
+                self.pretest_record.append(entry)
             elif self._item is not None and self._phase is not None:
                 _phase_record(self._item, self._phase).append(entry)
             else:
                 self._pending.append(entry)
 
-    def run_selftest(self, config: pytest.Config) -> SelfTestResult:
-        """Open the bench and run the self-test, and show the result."""
+    def pretest(self, config: pytest.Config) -> SelfTestResult:
+        """What happens before the first test: open the bench, run the self-test, and if it
+        passed, read the DUT's identity. Show the result, and store it."""
         with self._lock:
-            self._in_selftest = True
+            self._in_pretest = True
         try:
             try:
                 bench = self._open()
@@ -290,13 +518,23 @@ class BenchSession:
                 result = could_not_open(exc)
             else:
                 result = run_selftest(bench)
+                if result.passed:
+                    self._identity_read = True
+                    bench.read_identity()
         finally:
             with self._lock:
-                self._in_selftest = False
+                self._in_pretest = False
         self.selftest = result
-        _show_selftest(config, result, self.selftest_record)
-        unexpected = [entry for entry in self.selftest_record if entry.unexpected]
-        _warn_unexpected(self._warn_at_description, "during the self-test", unexpected)
+        _show_selftest(config, result, self.pretest_record)
+        if result.passed and self.bench is not None and self.bench.identity:
+            shown = ", ".join(f"{name} {value}" for name, value in self.bench.identity.items())
+            _write(config, f"benchtare DUT identity: {shown}")
+        unexpected = [entry for entry in self.pretest_record if entry.unexpected]
+        _warn_unexpected(self._warn_at_description, "before the first test", unexpected)
+        if self.store is not None and self.run_id is not None:
+            self.store.add_selftest(self.run_id, result)
+            self.store.add_record(self.run_id, self.pretest_record, phase="pretest")
+            self._store_identity()
         return result
 
     def _warn_at_description(self, warning: Warning) -> None:
@@ -304,6 +542,31 @@ class BenchSession:
         warnings.warn_explicit(
             warning, type(warning), filename=str(self.description.path), lineno=1
         )
+
+    def _finish_identity(self, stopped: bool) -> None:
+        """At the end of the run: warn about listed identity items that were never collected,
+        and store them as missing."""
+        listed = self.description.identity
+        bench = self.bench
+        if bench is None:
+            # The bench never opened, so only the command line gave anything.
+            given = [
+                IdentityValue(name, value, COMMAND_LINE, name in listed, self._started)
+                for name, value in self._identify
+            ]
+            names = {name for name, _ in self._identify}
+            missing = {name: "" for name in listed if name not in names}
+        else:
+            given = []
+            missing = bench.missing_identity()
+            if self._identity_read and not stopped:
+                for name, note in missing.items():
+                    warning = DutIdentityWarning(_missing_text(name, note, bench.identity))
+                    self._warn_at_description(warning)
+        if self.store is not None and self.run_id is not None:
+            self._store_identity()
+            gone = [IdentityValue(name, None, MISSING, True, None) for name in missing]
+            self.store.add_identity(self.run_id, [*given, *gone])
 
     # --- hooks ----------------------------------------------------------------------------
 
@@ -315,11 +578,17 @@ class BenchSession:
                 return str(path)
 
         d, b, h = self.description, self.bench_config, self.harness
-        line = (
-            f"benchtare: DUT {d.name} ({shown(d.path)}), bench {b.name} ({shown(b.path)}), "
-            f"harness {h.name} ({shown(h.path)}); test record: {self.level.label}"
-        )
-        return [line]
+        lines = [
+            (
+                f"benchtare: DUT {d.name} ({shown(d.path)}), bench {b.name} ({shown(b.path)}), "
+                f"harness {h.name} ({shown(h.path)}); test record: {self.level.label}"
+            )
+        ]
+        if self.results_path is not None and self.run_id is not None:
+            lines.append(f"benchtare results: {shown(self.results_path)}, run {self.run_id}")
+        else:
+            lines.append("benchtare results: not stored")
+        return lines
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_collection(self, session: pytest.Session) -> bool | None:
@@ -331,15 +600,16 @@ class BenchSession:
     @pytest.hookimpl(tryfirst=True)
     def pytest_runtestloop(self, session: pytest.Session) -> bool | None:
         config = session.config
+        self._store_manifest(session)
         if self.selftest_only:
-            self.run_selftest(config)
+            self.pretest(config)
             return True
         if config.option.collectonly or session.testsfailed or not session.items:
             return None  # pytest reports these itself
         if not any("bench" in getattr(item, "fixturenames", ()) for item in session.items):
             _write(config, "benchtare self-test: not run, because no test uses the bench")
             return None
-        if not self.run_selftest(config).passed:
+        if not self.pretest(config).passed:
             pytest.exit(
                 "BenchTare's self-test failed, so no tests ran. What failed is listed above.",
                 returncode=pytest.ExitCode.INTERRUPTED,
@@ -348,6 +618,7 @@ class BenchSession:
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_protocol(self, item: pytest.Item) -> Generator[None, Any, None]:
+        item.stash[_STARTED] = time.time()
         with self._lock:
             self._item = item
         try:
@@ -410,6 +681,7 @@ class BenchSession:
             records = item.stash.setdefault(_RECORD, {})
             records.setdefault(call.when, []).append(result)
             snapshot = {phase: list(entries) for phase, entries in records.items()}
+        item.stash.setdefault(_REPORTS, {})[call.when] = report
         # Plain dicts, so the report can be serialised (for example by pytest-xdist).
         report.benchtare_record = [entry.as_dict() for entry in snapshot[call.when]]
         # Like pytest's captured output, a phase's report shows the record of the phases so far.
@@ -417,11 +689,12 @@ class BenchSession:
             entries = snapshot.get(phase, [])
             if any(entry.kind != RESULT for entry in entries):
                 report.sections.append((f"BenchTare record {phase}", render(entries)))
+        if call.when == "teardown":
+            self._store_test(item)
 
     def pytest_sessionfinish(self, session: pytest.Session) -> None:
         if self.bench is not None:
             self.bench.close()
-            self.bench = None
         with self._lock:
             self._after_last_test = [entry for entry in self._pending if entry.unexpected]
             self._pending.clear()
@@ -430,6 +703,19 @@ class BenchSession:
             # No tests were collected, which pytest would report as exit code 5.
             ok = self.selftest.passed
             session.exitstatus = pytest.ExitCode.OK if ok else pytest.ExitCode.TESTS_FAILED
+        stopped = session.exitstatus == pytest.ExitCode.INTERRUPTED
+        self._finish_identity(stopped)
+        if self.store is not None and self.run_id is not None:
+            self.store.add_record(self.run_id, self._after_last_test, phase="after-last-test")
+            self.store.finish_run(
+                self.run_id,
+                status=STOPPED if stopped else FINISHED,
+                exit_code=int(session.exitstatus),
+                counts=self._counts,
+            )
+            self.store.close()
+            self.store = None
+        self.bench = None
 
     def pytest_terminal_summary(self, terminalreporter: Any) -> None:
         if self._after_last_test:
@@ -476,7 +762,7 @@ def _phase_record(item: pytest.Item, phase: str) -> list[RecordEntry]:
 def _warn_unexpected(
     warn: Callable[[Warning], None], during: str, entries: Sequence[RecordEntry]
 ) -> None:
-    """One warning for the frames that don't match the DBC, one for each equipment failure."""
+    """One warning for the frames that don't match the DBC, and one for each other event."""
     mismatches = [entry for entry in entries if entry.kind == FRAME_MISMATCH]
     if mismatches:
         verb = "doesn't" if len(mismatches) == 1 else "don't"
@@ -489,6 +775,8 @@ def _warn_unexpected(
     for entry in entries:
         if entry.kind == EQUIPMENT_FAILURE:
             warn(EquipmentWarning(f"{during}: {entry.text}"))
+        elif entry.kind == IDENTITY_CHANGE:
+            warn(DutIdentityWarning(f"{during}: {entry.text}"))
 
 
 def _result_text(report: pytest.TestReport) -> str:
@@ -504,3 +792,50 @@ def _result_text(report: pytest.TestReport) -> str:
         message = str(longrepr or "")
     first_line = message.strip().splitlines()[0] if message.strip() else ""
     return f"{text}: {first_line}" if first_line else text
+
+
+def _conftest_files(config: pytest.Config) -> list[Path]:
+    """The conftest.py files pytest loaded."""
+    found = []
+    for plugin in config.pluginmanager.get_plugins():
+        file = getattr(plugin, "__file__", None)
+        if file and Path(file).name == "conftest.py":
+            found.append(Path(file))
+    return sorted(set(found))
+
+
+def _outcome(reports: dict[str, pytest.TestReport]) -> tuple[str, pytest.TestReport | None]:
+    """A test's outcome as pytest's summary counts it, and the report that decided it."""
+    setup, call, teardown = (reports.get(when) for when in PHASES)
+    if setup is not None and setup.failed:
+        return "error", setup
+    if setup is not None and setup.skipped:
+        return ("xfailed" if hasattr(setup, "wasxfail") else "skipped"), setup
+    if call is not None:
+        if call.failed:
+            return "failed", call
+        if call.skipped:
+            return ("xfailed" if hasattr(call, "wasxfail") else "skipped"), call
+    if teardown is not None and teardown.failed:
+        return "error", teardown
+    if call is not None and hasattr(call, "wasxfail"):
+        return "xpassed", call
+    return "passed", call
+
+
+def _short_message(report: pytest.TestReport) -> str | None:
+    """The one-line reason for a failure, error or skip; None for a pass."""
+    text = _result_text(report)
+    _, _, message = text.partition(": ")
+    return message or None
+
+
+def _missing_text(name: str, note: str, collected: Iterable[str]) -> str:
+    text = f"the DUT's {name} was never collected during this run"
+    if note:
+        text += f" ({note})"
+    text += "; it is stored as missing."
+    close = difflib.get_close_matches(name, list(collected), n=1, cutoff=0.6)
+    if close:
+        text += f" '{close[0]}' was recorded instead: is that a misspelling of '{name}'?"
+    return text

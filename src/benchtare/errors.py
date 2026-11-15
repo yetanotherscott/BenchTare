@@ -29,6 +29,10 @@ class EquipmentWarning(BenchTareWarning):
     """Bench equipment stopped working during a test."""
 
 
+class DutIdentityWarning(BenchTareWarning):
+    """Part of the DUT's identity was never collected, or changed during the run."""
+
+
 @dataclass(frozen=True)
 class Problem:
     """One thing wrong with a file, and what to check."""

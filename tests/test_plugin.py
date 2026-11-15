@@ -732,7 +732,7 @@ def test_loading_the_files_shows_in_the_live_log(project):
     result.stdout.fnmatch_lines(
         [
             "*live log sessionstart*",
-            "*loaded interface description reference.dut.yaml: DUT reference, 6 signals*",
+            "*loaded interface description reference.dut.yaml: DUT reference, 7 signals*",
             "*loaded harness file harness-io.yaml: harness reference-io*",
         ]
     )

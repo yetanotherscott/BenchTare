@@ -7,7 +7,8 @@ Behaviour (all times in seconds, adjustable for tests):
 
 - It boots ``boot_delay`` after start. Until then it ignores its CAN-side inputs and sends
   nothing.
-- After boot it reports ``Mode`` every ``heartbeat_period``, starting in ``standby``.
+- After boot it reports ``Mode`` every ``heartbeat_period``, starting in ``standby``, and its
+  software version, ``SwVersion`` (102, meaning 1.0.2), alongside it.
 - ``ModeRequest = run`` (or ``standby``) changes ``Mode`` after ``mode_delay``. Other codes
   are ignored.
 - Each ``Setpoint`` it receives is answered, ``echo_delay`` later, with ``Measured``: the
@@ -43,9 +44,11 @@ class ReferenceDevice:
         "ModeRequest",
         "Measured",
         "Mode",
+        "SwVersion",
         "supply_enable",
         "supply_ok",
     )
+    SOFTWARE_VERSION: ClassVar[int] = 102  # 1.0.2
     MODES: ClassVar[tuple[str, ...]] = ("standby", "run")
 
     def __init__(
@@ -119,6 +122,8 @@ class ReferenceDevice:
 
     def _boot(self) -> None:
         self.booted = True
+        # Before the first heartbeat, so every Heartbeat frame carries it.
+        self._publish("SwVersion", self.SOFTWARE_VERSION)
         self._publish("Measured", 0.0)
         self._heartbeat()
 

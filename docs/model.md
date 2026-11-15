@@ -105,8 +105,11 @@ code (`bench.identify("hardware_revision", "C")`) or the command line
 (`--identify hardware_revision=C`), at any point in the run. The list is a
 minimum: any other name can be recorded during the run too, such as the
 versions of subsystems the DUT reports. A listed item that is never collected
-is recorded as missing, with a warning. The values are stored with the run's
-results; see [results-schema.md](results-schema.md).
+is recorded as missing, with a `benchtare.DutIdentityWarning`, and so is a
+value that changes during the run. Tests can read the values collected so far
+from `bench.identity`. The values are stored with the run's results; see
+[results-schema.md](results-schema.md). The reference DUT lists one item,
+`software`, read from its `SwVersion` signal.
 
 **Standards.** A DUT may support standard protocols, such as J1939, that require
 a defined set of messages. The `standards:` key will declare these, and
@@ -347,8 +350,8 @@ benchtare_harness = "harness-can.yaml"
 
 - **Paths.** Command-line paths are relative to where pytest is run, and ini
   paths to the ini file. The command line wins over the ini file.
-- **Header.** The run's header names the DUT, bench and harness it used, and
-  the test record level.
+- **Header.** The run's header names the DUT, bench and harness it used, the
+  test record level, and where the run's results are stored.
 - **Checked at the start.** The files are loaded and checked when pytest
   starts. A wrong file stops the run with its problems, before any test runs.
 - **Opened when needed.** The bench is opened the first time a test asks for
@@ -359,6 +362,8 @@ benchtare_harness = "harness-can.yaml"
   changes another project's tests.
 - **Clean failures.** When a check fails, the failure points at the test's own
   line. BenchTare's internals are left out of the traceback.
+- **Results.** Every run is stored in the results database (see "Results and
+  the manifest"). The header says where, and gives the run's ID.
 
 ## The test record
 
@@ -516,13 +521,30 @@ whether it has changed since.
 
 ## Results and the manifest
 
-Every session is recorded in a local SQLite database (`.benchtare/` by
-default), using a versioned schema. Each run stores:
+Every session is stored in a local SQLite database, using a versioned schema.
+Each run stores:
 
-- each test's outcome, duration and test record;
-- a **manifest**: the BenchTare and Python versions, a timestamp, and hashes of
-  the interface description, its DBC files, the bench file, the harness file
-  and each test file.
+- each test's outcome, durations, failure report and test record;
+- the self-test, and the record of everything before the first test;
+- a **manifest**: the BenchTare and pytest versions, the time, the project's git
+  commit, and hashes of the interface description, its DBC files, the bench
+  file, the harness file, each test file, each `conftest.py` and the ini file;
+- the bench equipment, as each backend describes it: vendor, model, serial
+  number, firmware and driver, as far as it can tell;
+- the DUT's identity (see "Identity" above);
+- the machine and software it ran on: host, OS, Python build and every
+  installed package.
+
+| Option | Ini setting | What it does |
+| --- | --- | --- |
+| `--results PATH` | `benchtare_results` | Where the database is. Default `.benchtare/results.sqlite3` under pytest's rootdir |
+| `--no-results` | | Don't store this run, for throwaway runs while writing tests |
+| `--identify NAME=VALUE` | | Part of the DUT's identity, such as `hardware_revision=C`; repeatable |
+
+A run is written as it goes, so a run that crashed still has every test that
+finished, and is marked `running`. A database written by a newer BenchTare is
+refused, and nothing is written to it. An older one is backed up and upgraded.
+Runs that only collect tests (`--collect-only`) aren't stored.
 
 The manifest makes a run reproducible. It shows which DUT description, bench
 and harness a result came from, and whether anything has changed since. Each

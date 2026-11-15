@@ -11,6 +11,9 @@ Signals can be listed directly, imported from DBC files, or both. See docs/model
       boot_count: {type: int, unit: none, direction: output}
     overrides:
       Setpoint: {unit: degC}  # adjust an imported signal
+    identity:                 # what each run records about the DUT; names only, never values
+      hardware_revision:
+      bootloader: {signal: BootloaderVersion}
     standards: []             # reserved; no standard is available yet
 
 Numeric signals must declare a unit. ``unit: none`` says a signal deliberately has none.
@@ -30,6 +33,7 @@ from typing import Any
 import cantools
 
 from benchtare._yaml import YAML_VALUE_WORDS, count, kind_of, read_mapping
+from benchtare.dut.identity import DEFAULT_WITHIN, IdentityItem, name_problem
 from benchtare.errors import ConfigError, Problem
 from benchtare.signals.model import (
     NUMERIC_TYPES,
@@ -47,7 +51,8 @@ KIND = "interface description"
 # The unit to write for a numeric signal that has no unit.
 NO_UNIT = "none"
 
-_TOP_KEYS = ("dut", "can", "signals", "overrides", "standards")
+_TOP_KEYS = ("dut", "can", "signals", "overrides", "identity", "standards")
+_IDENTITY_KEYS = ("signal", "within")
 _CAN_KEYS = ("node", "dbc")
 _SIGNAL_KEYS = ("type", "direction", "unit", "values")
 _OVERRIDE_KEYS = ("name", "unit", "direction")
@@ -81,6 +86,8 @@ class InterfaceDescription:
     can_node: str | None = None
     dbc_files: tuple[Path, ...] = ()
     can_signals: Mapping[str, CanSignalRef] = field(default_factory=dict)
+    # The items each run is expected to collect about the DUT, by name.
+    identity: Mapping[str, IdentityItem] = field(default_factory=dict)
 
     @property
     def files(self) -> tuple[Path, ...]:
@@ -130,6 +137,7 @@ def load_interface_description(path: str | os.PathLike[str]) -> InterfaceDescrip
     _apply_overrides(data.get("overrides", {}), candidates, skipped, can_node, problems)
 
     signals = _build_signals(candidates, problems)
+    identity = _load_identity(data.get("identity"), {s.name: s for s in signals}, problems)
     if not problems and not signals:
         problems.append(
             Problem(
@@ -156,6 +164,7 @@ def load_interface_description(path: str | os.PathLike[str]) -> InterfaceDescrip
         can_node=can_node,
         dbc_files=dbc_files,
         can_signals=MappingProxyType(can_signals),
+        identity=MappingProxyType(identity),
     )
 
 
@@ -192,6 +201,89 @@ def _check_standards(standards: Any, problems: list[Problem]) -> None:
                 "or import them from a DBC file",
             )
         )
+
+
+def _load_identity(
+    section: Any, signals: Mapping[str, Signal], problems: list[Problem]
+) -> dict[str, IdentityItem]:
+    """``identity:``, either a list of names or a mapping of name to how to read it."""
+    if section is None:
+        return {}
+    example = "for example  identity: [hardware_revision, bootloader]"
+    if isinstance(section, list):
+        entries: list[tuple[Any, Any]] = [(name, None) for name in section]
+    elif isinstance(section, dict):
+        entries = list(section.items())
+    else:
+        problems.append(
+            Problem(
+                f"'identity:' must list the items to record, not {kind_of(section)}", hint=example
+            )
+        )
+        return {}
+    items: dict[str, IdentityItem] = {}
+    for name, spec in entries:
+        where = "identity"
+        if not isinstance(name, str):
+            problems.append(
+                Problem(
+                    f"an item's name was read as {kind_of(name)}",
+                    where=where,
+                    hint="put it in quotes to make it a name, for example  '2':",
+                )
+            )
+            continue
+        problem = name_problem(name)
+        if problem:
+            problems.append(Problem(problem, where=where))
+            continue
+        if name in items:
+            problems.append(Problem(f"'{name}' is listed twice", where=where))
+            continue
+        where = f"identity: {name}"
+        if spec is None:
+            items[name] = IdentityItem(name)
+            continue
+        if not isinstance(spec, dict):
+            problems.append(
+                Problem(
+                    f"must be empty, or say how to read it, not {kind_of(spec)}",
+                    where=where,
+                    hint=f"for example  {name}: {{signal: SoftwareVersion}}, or leave it empty "
+                    "for a value the team's code or the command line gives",
+                )
+            )
+            continue
+        _check_keys(spec, _IDENTITY_KEYS, f"in {where}", problems)
+        signal_name = spec.get("signal")
+        within = spec.get("within", DEFAULT_WITHIN)
+        ok = True
+        if signal_name is not None:
+            signal = signals.get(signal_name) if isinstance(signal_name, str) else None
+            if signal is None:
+                problems.append(
+                    Problem(
+                        f"signal '{signal_name}' isn't in this interface description",
+                        where=where,
+                        hint=_close_signal(str(signal_name), signals),
+                    )
+                )
+                ok = False
+            elif signal.direction is not Direction.OUTPUT:
+                problems.append(
+                    Problem(
+                        f"signal '{signal_name}' is a DUT input; an identity is read from a DUT "
+                        "output",
+                        where=where,
+                    )
+                )
+                ok = False
+        if isinstance(within, bool) or not isinstance(within, (int, float)) or within <= 0:
+            problems.append(Problem("'within:' must be a number of seconds above 0", where=where))
+            ok = False
+        if ok:
+            items[name] = IdentityItem(name, signal=signal_name, within=float(within))
+    return items
 
 
 # --- CAN imports -------------------------------------------------------------------------------
@@ -532,6 +624,11 @@ def _parse_direction(
             )
         )
         return None
+
+
+def _close_signal(raw: str, signals: Mapping[str, Signal]) -> str:
+    close = difflib.get_close_matches(raw, list(signals), n=1, cutoff=0.6)
+    return f"did you mean '{close[0]}'?" if close else "the signals this description lists"
 
 
 def _suggest(raw: str, allowed: list[str]) -> str | None:

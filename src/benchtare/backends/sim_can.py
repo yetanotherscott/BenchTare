@@ -42,7 +42,14 @@ from benchtare.backends._can_codec import (
     open_virtual_bus,
     to_python,
 )
-from benchtare.backends.base import Binding, ChannelCaps, EquipmentKind, Receiver, WriteError
+from benchtare.backends.base import (
+    Binding,
+    ChannelCaps,
+    EquipmentIdentity,
+    EquipmentKind,
+    Receiver,
+    WriteError,
+)
 from benchtare.errors import Problem
 from benchtare.record import (
     EQUIPMENT_FAILURE,
@@ -186,6 +193,13 @@ class SimCan:
         """Simulate a failed CAN interface: check() reports it, and nothing passes."""
         self._failure = reason
         log.info("%s: simulated failure: %s", self.equipment, reason)
+
+    def identity(self) -> EquipmentIdentity:
+        return EquipmentIdentity(
+            driver="python-can virtual bus",
+            driver_version=can.__version__,
+            details={"bus": self.bus_name, "fd": self.fd},
+        )
 
     def wait_for_traffic(self, timeout: float) -> bool:
         if self._failure is not None:

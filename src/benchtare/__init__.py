@@ -11,8 +11,19 @@ them. The marker also stops a warning when ``benchtare selftest``, having import
 starts pytest.
 """
 
-from benchtare.errors import BenchTareWarning, EquipmentWarning, FrameMismatchWarning
+from benchtare.errors import (
+    BenchTareWarning,
+    DutIdentityWarning,
+    EquipmentWarning,
+    FrameMismatchWarning,
+)
 
 __version__ = "0.0.1"
 
-__all__ = ["BenchTareWarning", "EquipmentWarning", "FrameMismatchWarning", "__version__"]
+__all__ = [
+    "BenchTareWarning",
+    "DutIdentityWarning",
+    "EquipmentWarning",
+    "FrameMismatchWarning",
+    "__version__",
+]

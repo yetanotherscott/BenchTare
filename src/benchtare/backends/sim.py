@@ -23,8 +23,16 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar
 
+from benchtare import __version__
 from benchtare._yaml import YAML_VALUE_WORDS, kind_of
-from benchtare.backends.base import Binding, ChannelCaps, EquipmentKind, Receiver, WriteError
+from benchtare.backends.base import (
+    Binding,
+    ChannelCaps,
+    EquipmentIdentity,
+    EquipmentKind,
+    Receiver,
+    WriteError,
+)
 from benchtare.errors import Problem
 from benchtare.record import EQUIPMENT_FAILURE, RecordEntry, RecordLevel
 
@@ -145,6 +153,19 @@ class SimIO:
         if self._sampler is not None:
             self._sampler.join(timeout=1.0)
             self._sampler = None
+
+    def identity(self) -> EquipmentIdentity:
+        def caps(c: ChannelCaps) -> str:
+            return ", ".join(word for word, on in (("drive", c.drive), ("read", c.read)) if on)
+
+        return EquipmentIdentity(
+            driver="benchtare sim",
+            driver_version=__version__,
+            details={
+                "sample_period": self.sample_period,
+                "channels": {name: caps(c) for name, c in sorted(self.channels.items())},
+            },
+        )
 
     def check(self) -> list[str]:
         if self._failure is not None:

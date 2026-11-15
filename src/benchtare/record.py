@@ -11,8 +11,9 @@ Levels, each including the ones before it:
 - ``stimuli``: also every value written. The default.
 - ``debug``: also every frame the bench sent and received.
 
-Anything unexpected the bench saw, such as a frame that doesn't match the DBC or equipment that
-stopped working, is recorded at every level, so no setting can hide it.
+Anything unexpected the bench saw, such as a frame that doesn't match the DBC, equipment that
+stopped working, or a DUT whose software version changed during the run, is recorded at every
+level, so no setting can hide it. So is each part of the DUT's identity as it is collected.
 """
 
 from __future__ import annotations
@@ -57,8 +58,10 @@ FRAME_MISMATCH = "frame_mismatch"
 EQUIPMENT_FAILURE = "equipment_failure"
 FRAME_SENT = "frame_sent"
 FRAME_RECEIVED = "frame_received"
+IDENTIFY = "identify"
+IDENTITY_CHANGE = "identity_change"
 
-UNEXPECTED = frozenset({FRAME_MISMATCH, EQUIPMENT_FAILURE})
+UNEXPECTED = frozenset({FRAME_MISMATCH, EQUIPMENT_FAILURE, IDENTITY_CHANGE})
 
 
 @dataclass(frozen=True)

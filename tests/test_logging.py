@@ -90,14 +90,14 @@ def test_loading_the_reference_files_is_logged(logs):
     bench = load_bench_file(reference.path(reference.BENCH))
     load_harness_file(reference.path(reference.HARNESS_CAN), description, bench)
     assert logs(logging.INFO) == [
-        "reference.dut.yaml: imported 4 signals from reference.dbc for node REFDEV",
+        "reference.dut.yaml: imported 5 signals from reference.dbc for node REFDEV",
         (
-            "loaded interface description reference.dut.yaml: DUT reference, 6 signals "
-            "(4 from DBC files, 2 listed inline)"
+            "loaded interface description reference.dut.yaml: DUT reference, 7 signals "
+            "(5 from DBC files, 2 listed inline)"
         ),
         "loaded bench file bench-sim.yaml: bench laptop-sim, equipment can0 (sim_can), io (sim)",
         (
-            "loaded harness file harness-can.yaml: harness reference-can, 6 connections, "
+            "loaded harness file harness-can.yaml: harness reference-can, 7 connections, "
             "1 loopback, 2 presence checks, simulating DUT reference"
         ),
     ]

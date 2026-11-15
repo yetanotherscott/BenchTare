@@ -7,6 +7,7 @@ connections:
   ModeRequest: can0
   Measured: can0
   Mode: can0
+  SwVersion: can0
   supply_enable: io.out1
   supply_ok: io.in1
 

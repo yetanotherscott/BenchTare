@@ -1,9 +1,9 @@
-# Results schema (proposal)
+# Results schema
 
-**Status: draft for review, with its open decisions settled (see the end).
-Nothing here is built yet.** This is the schema M5 would create as version 1,
-with the tables M6 and M8 would add later shown so that version 1 leaves room
-for them.
+**Status: version 1 is built (M5).** This is the schema the results database
+is created with, and the tables M6 and M8 will add, shown so that version 1
+leaves room for them. Changing it means a new version and a migration, never a
+silent change.
 
 ## What it has to serve
 
@@ -227,10 +227,10 @@ The test record, one row per entry, for every test and for the self-test.
 | --- | --- | --- |
 | `run_id` | TEXT, not null | |
 | `seq` | INTEGER, not null | Order in the run, from 1 |
-| `test_seq` | INTEGER | The test it belongs to; null for the self-test and after the last test |
-| `phase` | TEXT, not null | `setup`, `call`, `teardown`, `selftest` or `after-last-test` |
+| `test_seq` | INTEGER | The test it belongs to; null before the first test and after the last |
+| `phase` | TEXT, not null | `setup`, `call`, `teardown`, `pretest` (the self-test and reading the DUT's identity, before the first test) or `after-last-test` |
 | `at` | TEXT, not null | |
-| `kind` | TEXT, not null | `read`, `wait_until`, `assert`, `result`, `write`, `frame_mismatch`, `equipment_failure`, `frame_sent`, `frame_received` |
+| `kind` | TEXT, not null | `read`, `wait_until`, `assert`, `result`, `write`, `identify`, `identity_change`, `frame_mismatch`, `equipment_failure`, `frame_sent`, `frame_received` |
 | `level` | TEXT, not null | `results`, `stimuli` or `debug` |
 | `text` | TEXT, not null | The line people read |
 | `signal` | TEXT | Signal name, or channel for a loopback |
