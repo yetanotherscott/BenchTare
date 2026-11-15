@@ -1,0 +1,12 @@
+# Interface description of the BenchTare reference DUT.
+# Its CAN signals come from reference.dbc; its supply lines are plain digital signals.
+
+dut: reference
+
+can:
+  node: REFDEV
+  dbc: [reference.dbc]
+
+signals:
+  supply_enable: {type: bool, direction: input}
+  supply_ok: {type: bool, direction: output}

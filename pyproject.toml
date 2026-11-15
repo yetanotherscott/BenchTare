@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "PyYAML>=6.0",     # interface description, bench and harness files (M1)
     "cantools>=45.0",  # DBC import into the interface description (M1)
+    "python-can>=4.6", # virtual CAN bus for the sim_can backend (M2); LGPL-3.0, unmodified
 ]
 
 [project.optional-dependencies]

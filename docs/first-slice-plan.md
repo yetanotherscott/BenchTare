@@ -49,20 +49,27 @@ benchtare/
 │   │   └── model.py         # Signal and SignalSet
 │   ├── dut/
 │   │   └── description.py   # interface description: inline signals, DBC imports
+│   ├── errors.py            # ConfigError and Problem: what failed, where, what to check
 │   ├── bench/
-│   │   └── config.py        # bench file: equipment, backends, channels
+│   │   ├── config.py        # bench file: equipment, backends, channels
+│   │   └── runtime.py       # Bench: write, wait_until, read
 │   ├── harness/
 │   │   └── config.py        # harness file: connections, loopbacks, presence checks
 │   ├── backends/
 │   │   ├── base.py          # Backend protocol, receive buffer, read rule
-│   │   ├── sim.py           # in-process simulated equipment
-│   │   └── sim_can.py       # virtual CAN bus through python-can
+│   │   ├── sim.py           # in-process simulated I/O
+│   │   ├── sim_can.py       # virtual CAN bus through python-can
+│   │   └── _can_codec.py    # DBC encoding, shared by the bench and simulated DUT sides
+│   ├── sim/
+│   │   ├── registry.py      # simulated DUTs a harness can plug in
+│   │   └── simulation.py    # wires a simulated DUT to simulated equipment
 │   ├── reference/
 │   │   ├── device.py        # the simulated reference DUT
 │   │   ├── reference.dut.yaml
 │   │   ├── reference.dbc
 │   │   ├── bench-sim.yaml   # simulated bench: virtual CAN plus simulated I/O
-│   │   └── harness-sim.yaml
+│   │   ├── harness-can.yaml # CAN signals on the virtual bus
+│   │   └── harness-io.yaml  # every signal on simulated I/O, no CAN
 │   ├── selftest/
 │   │   └── checks.py        # bench check and harness check
 │   ├── testcheck/
@@ -96,17 +103,27 @@ implementations without changing them.
   DUT into a `SignalSet`, combining inline signals, DBC imports (direction from
   sender and receiver nodes) and overrides. `standards:` is accepted as a key,
   but any value is rejected for now.
-- **`Backend`** (`backends/base.py`): a `typing.Protocol` with `open()`,
-  `close()`, `check()` (returns the problems found), the channels it offers and
-  whether each can be driven or read, `write(signal, channel, value)` and
-  `read(signal, channel, after, timeout)`. A bus backend uses the signal's
-  encoding, and a plain I/O backend ignores it. A shared receive buffer
-  implements the read rule using a bench-wide sequence counter, not wall-clock
-  time.
-- **`Bench`** (the `bench` fixture): routes each signal through the harness to
-  its equipment and backend. It offers `write`, `read` and `wait_until`.
-  `read` returns the first value received after the bench's most recent
-  write.
+- **`Backend`** (`backends/base.py`): a `typing.Protocol`.
+  - `open(bindings, receiver)` binds the backend's channels to DUT signals and
+    loopback ends. A binding carries the signal's CAN encoding when it has
+    one, which a bus backend uses and a plain I/O backend ignores.
+  - `close()`.
+  - `check()` returns the problems found.
+  - `write(binding, value)` raises `WriteError` only when the channel can't
+    carry the value.
+  - Received values go to the receiver. That is the bench's `ReceiveBuffer`,
+    which implements the read rule with a bench-wide sequence counter, not
+    wall-clock time. Writes and deliveries share its lock.
+  - The backend's class declares its kind (`channels` or `bus`), whether it
+    is simulated, and how to check its bench-file options.
+- **`Bench`** (`bench/runtime.py`, the `bench` fixture): routes each signal
+  through the harness to its equipment and backend.
+  - It offers `write`, `wait_until` and `read`. `wait_until` is the way to
+    check a reaction. `read` returns the first value received after the
+    bench's most recent write.
+  - When the harness says `simulate:`, it starts the `Simulation`
+    (`sim/simulation.py`), which wires the simulated DUT to the simulated
+    equipment.
 - **`ResultStore`** (`results/store.py`): `start_run(manifest)`,
   `record(test_id, outcome, measurements, requirement_ids)`, `finish_run()`.
   SQLite is the only implementation in this slice.
@@ -120,7 +137,7 @@ Each milestone ends with passing tests and a commit. Do them in order.
 - The package installs with `pip install -e .` and imports as `benchtare`.
 - `pytest` and `ruff` run clean in CI (GitHub Actions).
 
-### M1: Interface description and signals
+### M1: Interface description and signals (done)
 
 - `Signal` and `SignalSet`.
 - Load an interface description with inline signals, DBC imports and
@@ -133,7 +150,7 @@ Each milestone ends with passing tests and a commit. Do them in order.
   - any `standards:` value is rejected with a clear message;
   - every error names the file and the signal.
 
-### M2: Bench, harness, backends and the reference DUT
+### M2: Bench, harness, backends and the reference DUT (done)
 
 - Load the bench file and the harness file. Check the harness against the
   interface description and the bench file: every connection names a real
@@ -143,11 +160,13 @@ Each milestone ends with passing tests and a commit. Do them in order.
 - The `sim` and `sim_can` backends. `sim_can` gives each `open()` its own
   virtual bus name unless the bench file sets one, so two benches in one
   process never share a bus.
-- The reference DUT, with its interface description, DBC, bench file and
-  harness file. It boots, moves from standby to run on request, echoes the
-  setpoint as the measured value after a fixed delay, and has `supply_ok`
-  follow `supply_enable`. The simulated bench builds its wiring from the
-  harness file. For tests only, it can cut a wire or fail an equipment item.
+- The reference DUT, with its interface description, DBC, one bench file and
+  two harness files: one with the CAN signals on a virtual bus, one with
+  every signal on simulated I/O. The DUT boots, moves from standby to run on
+  request, answers each setpoint with the measured value after a short delay,
+  and has `supply_ok` follow `supply_enable`. The simulation builds its
+  wiring from the harness file. For tests only, it can cut a wire, unplug the
+  DUT from a bus, or fail an equipment item.
 - Tests:
   - a stimulus produces the expected response on both backends;
   - a stale value is never returned, and a fast reply is never missed;

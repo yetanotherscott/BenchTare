@@ -114,16 +114,28 @@ equipment:
   can0:
     backend: sim_can      # a virtual CAN bus: one channel, the bus itself
   io:
-    backend: sim          # simulated digital I/O
+    backend: sim          # simulated I/O
     channels:
       out1: {drive: true}
       out2: {drive: true}
+      out3: {drive: true}
+      out4: {drive: true}
       in1: {read: true}
       in2: {read: true}
+      in3: {read: true}
+      in4: {read: true}
 ```
 
 A bench file describes equipment only. It names no DUT signals, so it can be
 reused for any DUT.
+
+The first slice has two backends, both simulated. Hardware backends come later
+behind the same interface.
+
+- **`sim`** is simulated I/O with named channels. Its read channels are sampled
+  continuously, like a DAQ.
+- **`sim_can`** is a virtual CAN bus. Each bench gets a bus of its own, so two
+  benches in one process never hear each other.
 
 ## The harness file
 
@@ -132,19 +144,19 @@ each signal is on, which loopbacks the harness provides, and how to tell that
 the DUT is present.
 
 ```yaml
-# harness-sim.yaml
-harness: reference-on-laptop
+# harness-can.yaml
+harness: reference-can
 
 connections:              # signal: equipment[.channel]
   Setpoint: can0
-  Measured: can0
   ModeRequest: can0
+  Measured: can0
   Mode: can0
   supply_enable: io.out1
   supply_ok: io.in1
 
 loopbacks:                # a bench output wired straight back to a bench input
-  - {drive: io.out2, read: io.in2}
+  - {drive: io.out4, read: io.in4}
 
 presence:                 # how to tell the DUT is connected and alive
   - {bus: can0, within: 1.0}        # any DUT traffic on the bus
@@ -154,9 +166,17 @@ simulate: reference       # only for simulated setups: which simulated DUT to pl
 ```
 
 Every signal used by a test needs a connection. A DUT `input` must be connected
-to a channel the bench can drive, and a DUT `output` to one it can read. The
-harness file is checked against both the interface description and the bench
-file when it loads, and an error names the file, the signal and the channel.
+to a channel the bench can drive, and a DUT `output` to one it can read. Each
+channel carries one signal or one loopback end, while a bus carries many. Only
+signals imported from a DBC file can go on a CAN bus. A DBC signal can still
+be wired to a plain channel: the DBC says how it is encoded on CAN, and the
+harness says where it goes. The harness file is checked against both the
+interface description and the bench file when it loads, and an error names
+the file, the signal and the channel.
+
+The reference ships two harnesses for the same DUT and bench:
+`harness-can.yaml` (above), and `harness-io.yaml`, which puts every signal on a
+simulated I/O channel and uses no CAN at all.
 
 With real hardware the harness is a physical thing and the file describes it.
 With a simulated bench, the simulation builds its wiring from the harness file
@@ -195,7 +215,7 @@ import pytest
 
 def test_setpoint_is_tracked(running, bench, signals):
     bench.write(signals.Setpoint, 42.0)
-    assert bench.read(signals.Measured, timeout=1.0) == pytest.approx(42.0, abs=0.5)
+    bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
 ```
 
 The `bench` fixture provides:
@@ -203,10 +223,23 @@ The `bench` fixture provides:
 | Call | What it does |
 | --- | --- |
 | `bench.write(signal, value)` | Drive a DUT input |
-| `bench.read(signal, timeout)` | Return the first value of the signal received **after the bench's most recent write**, waiting up to `timeout` seconds. A stale value from before the write is never returned, and a fast reply is never missed |
-| `bench.wait_until(signal, expected, timeout)` | Wait until the signal equals `expected`, or until a predicate given as `expected` is true |
+| `bench.wait_until(signal, expected, timeout)` | Wait for a value of the signal, received after the bench's most recent write, that equals `expected` (`pytest.approx` works), or for which `expected` returns true if it is a function. Returns that value. **Use this to check how the DUT reacts** |
+| `bench.read(signal, timeout)` | Return the first value of the signal received after the bench's most recent write, waiting up to `timeout` seconds. A value from before the write is never returned, and a fast reply is never missed |
 
-A timeout raises an error that names the signal, its channel and the timeout.
+**Why responses use `wait_until`.** The first value after a write is often
+sent before the DUT has reacted. This happens when the DUT reports an output
+cyclically, when a DAQ samples a channel continuously, or when a CAN frame
+carries several signals and the DUT answers each frame. `read` is right for a
+state that has already settled, or a protocol where each request gets exactly
+one answer. To check a reaction, wait for it.
+
+A timeout raises an error. It names the signal, its channel and the timeout,
+gives the last value received and how long ago, and says what to check. If the
+equipment reports a fault, the error says that instead.
+
+Writing a DUT output, or reading a DUT input, is refused. Tests drive inputs and
+read outputs. An enum can be written by value name, or as a raw number to send
+a code the DUT doesn't define.
 
 **DUT faults are stimuli.** To test how the DUT handles a fault, the test writes
 the input that represents it: an implausible sensor value, a mode request the
@@ -268,21 +301,33 @@ and harness a result came from, and whether anything has changed since.
 
 ## The reference
 
-BenchTare ships a simulated **reference** DUT, with its interface description,
-bench files and harness files, inside the package. It's used for the quickstart
-(`benchtare init`) and for BenchTare's own test suite, so nothing needs
-hardware.
+BenchTare ships a simulated **reference** DUT inside the package, in
+`benchtare/reference/`, along with these files:
+
+- its interface description, `reference.dut.yaml`;
+- `reference.dbc`;
+- one bench file, `bench-sim.yaml`;
+- two harness files, `harness-can.yaml` and `harness-io.yaml`.
+
+It's used for the quickstart (`benchtare init`) and for BenchTare's own test
+suite, so nothing needs hardware.
 
 The reference DUT behaves simply and predictably:
 
-- It boots after a short delay, then reports `Mode = standby`.
-- Writing `ModeRequest = run` moves it to `run`.
-- In `run`, it echoes `Setpoint` back as `Measured` after a fixed delay.
+- It boots after a short delay, then reports `Mode` every heartbeat, starting
+  in `standby`.
+- Writing `ModeRequest = run` moves it to `run`. Undefined codes are ignored.
+- It answers each `Setpoint` it receives with `Measured`, after a short delay:
+  the setpoint in `run`, and 0.0 in `standby`.
 - `supply_ok` follows `supply_enable`.
 
-For BenchTare's own tests only, the simulated bench can cut a simulated wire or
-fail a simulated equipment item, which proves the self-test catches real
-problems.
+The device itself deals only in signal values. The simulation wires it to the
+bench by following the harness file, so the same device runs behind a virtual
+CAN bus or behind simulated I/O channels.
+
+For BenchTare's own tests only, the simulation can cut a simulated wire, unplug
+the DUT from a bus, or fail a simulated equipment item. That proves the
+self-test catches real problems.
 
 ## What BenchTare doesn't do
 

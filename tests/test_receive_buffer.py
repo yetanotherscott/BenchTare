@@ -1,0 +1,112 @@
+"""The receive buffer, which implements the read rule. Deterministic: no simulation, no timing."""
+
+import threading
+
+from benchtare.backends.base import ReceiveBuffer
+
+
+def test_first_value_after_write_is_returned():
+    buffer = ReceiveBuffer()
+    with buffer.writing():
+        pass
+    buffer.deliver("Measured", 1)
+    buffer.deliver("Measured", 2)
+    assert buffer.first_after_write("Measured", timeout=0).value == 1
+
+
+def test_value_from_before_the_write_is_never_returned():
+    buffer = ReceiveBuffer()
+    buffer.deliver("Measured", "stale")
+    with buffer.writing():
+        pass
+    assert buffer.first_after_write("Measured", timeout=0.05) is None
+    buffer.deliver("Measured", "fresh")
+    assert buffer.first_after_write("Measured", timeout=0).value == "fresh"
+
+
+def test_reply_delivered_during_the_write_counts_as_after_it():
+    # A fast DUT can answer before write() has returned. Its delivery waits for the lock and
+    # then counts as after the write, so it isn't missed.
+    buffer = ReceiveBuffer()
+    buffer.deliver("Measured", "stale")
+    replied = threading.Event()
+
+    def reply():
+        buffer.deliver("Measured", "reply")
+        replied.set()
+
+    with buffer.writing():
+        thread = threading.Thread(target=reply)
+        thread.start()
+        assert not replied.wait(0.05)  # blocked until the write finishes
+    thread.join(1)
+    assert buffer.first_after_write("Measured", timeout=0).value == "reply"
+
+
+def test_reply_delivered_before_read_is_called_is_not_missed():
+    buffer = ReceiveBuffer()
+    with buffer.writing():
+        pass
+    buffer.deliver("Measured", "early")
+    # read() is called only now.
+    assert buffer.first_after_write("Measured", timeout=0).value == "early"
+
+
+def test_first_after_write_waits_for_a_value():
+    buffer = ReceiveBuffer()
+    with buffer.writing():
+        pass
+    timer = threading.Timer(0.05, buffer.deliver, args=("Measured", 7))
+    timer.start()
+    assert buffer.first_after_write("Measured", timeout=2).value == 7
+
+
+def test_first_after_write_times_out():
+    buffer = ReceiveBuffer()
+    assert buffer.first_after_write("Measured", timeout=0.02) is None
+
+
+def test_wait_for_match_skips_non_matching_values():
+    buffer = ReceiveBuffer()
+    with buffer.writing():
+        pass
+    for value in (0, 10, 41.9, 42.1):
+        buffer.deliver("Measured", value)
+    match = buffer.wait_for_match("Measured", lambda v: v > 42, timeout=0)
+    assert match.value == 42.1
+
+
+def test_wait_for_match_ignores_values_from_before_the_write():
+    buffer = ReceiveBuffer()
+    buffer.deliver("Mode", "run")
+    with buffer.writing():
+        pass
+    assert buffer.wait_for_match("Mode", lambda v: v == "run", timeout=0.02) is None
+
+
+def test_wait_for_match_waits_for_later_values():
+    buffer = ReceiveBuffer()
+    timers = [
+        threading.Timer(0.02, buffer.deliver, args=("Mode", "standby")),
+        threading.Timer(0.05, buffer.deliver, args=("Mode", "run")),
+    ]
+    for timer in timers:
+        timer.start()
+    assert buffer.wait_for_match("Mode", lambda v: v == "run", timeout=2).value == "run"
+
+
+def test_last_remembers_values_across_writes():
+    buffer = ReceiveBuffer()
+    buffer.deliver("Mode", "standby")
+    with buffer.writing():
+        pass
+    assert buffer.last("Mode").value == "standby"
+    assert buffer.last("Other") is None
+
+
+def test_keys_are_independent():
+    buffer = ReceiveBuffer()
+    with buffer.writing():
+        pass
+    buffer.deliver("A", 1)
+    assert buffer.first_after_write("B", timeout=0.02) is None
