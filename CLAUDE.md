@@ -42,6 +42,8 @@ out of scope, stop and ask.
 - **No hardware required.** Everything in the first slice, including the
   framework's own test suite, must run on a laptop against the simulated
   reference device.
+- **Linux, Windows and macOS.** CI tests all three. No OS-specific calls,
+  paths through `pathlib`, and no reliance on an OS's own error wording.
 
 ## Vocabulary
 

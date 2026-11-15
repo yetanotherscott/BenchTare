@@ -8,6 +8,15 @@ from benchtare.bench.runtime import open_bench
 
 pytest_plugins = ["pytester"]
 
+
+@pytest.fixture(autouse=True)
+def _utf8_subprocess_output(monkeypatch):
+    """pytester reads a subprocess's output as UTF-8, but on Windows Python writes it in the
+    local code page, so a character such as the ± in pytest.approx can't be read back. Only the
+    output's encoding changes; files are still read and written as the code under test says."""
+    monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
+
+
 # A DUT output in a multiplexed message: a frame with a multiplexer value the DBC doesn't define
 # can't be decoded, which is how these tests make the DUT send a frame that doesn't match.
 MUX_DBC = """\

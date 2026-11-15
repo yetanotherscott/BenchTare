@@ -166,13 +166,14 @@ proposal.
 | 8 | Community | Backend and adapter guides; write-back adapters from contributors |
 | 9 | Test development in IDEs | Setup for writing and debugging tests in common IDEs, such as VS Code and PyCharm: schemas so the editor completes and checks interface descriptions, bench files and harness files; completion of signal names in tests; run and debug configurations; `benchtare init` writing them for a new project |
 | 10 | GUI | A graphical front end for people who don't live in a terminal, for example to run the self-test and tests, follow a run, and browse results and test records. It drives pytest and reads the results database; it doesn't replace either. Scope to be decided |
-| 11 | Platforms | Linux, Windows and macOS all supported and tested: CI on all three; hardware backends that work on each (SocketCAN, from stage 2, is Linux-only, so Windows and macOS need vendor CAN adapters through python-can's interfaces, such as PCAN or Kvaser); install and setup guides for each |
+| 11 | Platforms | Linux, Windows and macOS supported on real hardware as well as in simulation: hardware backends that work on each (SocketCAN, from stage 2, is Linux-only, so Windows and macOS need vendor CAN adapters through python-can's interfaces, such as PCAN or Kvaser); install and setup guides for each |
 
 Stages 9 to 11 are on the horizon rather than planned in detail. None is
 needed for the first slice, but the first slice shouldn't make them harder: the
-file formats, the CLI and the results schema are what they will build on, and
-the code is kept portable (no Linux-only calls, paths through `pathlib`), even
-though CI tests it on Linux only for now.
+file formats, the CLI and the results schema are what they will build on. The
+first slice already runs on all three platforms: CI tests it on Linux, Windows
+and macOS, and the code stays portable (no OS-specific calls, paths through
+`pathlib`).
 
 ## Prior art
 
@@ -236,5 +237,5 @@ not from hands-on evaluation.
 - [ ] Which local database is the default? (SQLite is assumed in the first-slice plan.)
 - [ ] Which IDEs get a ready-made setup first?
 - [ ] What should the GUI cover first, and should it be a desktop app or a local web page?
-- [ ] When should CI start testing on Windows and macOS? The first slice runs on
-      simulated equipment only, so this could come early.
+- [x] When should CI start testing on Windows and macOS? From the first slice:
+      CI tests all three.

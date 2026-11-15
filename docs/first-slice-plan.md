@@ -18,6 +18,7 @@ start, and each is easy to change early.
 | --- | --- | --- |
 | SQLite is the default local database | It is in the Python standard library, so there is nothing to install | Low, if the store sits behind an interface |
 | Python 3.10 or newer | Structural pattern matching and modern typing | Low |
+| Linux, Windows and macOS, tested in CI | The first slice is pure Python on simulated equipment, so it costs little to keep all three working from the start | Low now, higher once hardware backends exist |
 | Standalone project, not built on Jumpstarter | Keeps the first slice free of a large dependency | Medium |
 
 ## Dependencies
@@ -136,7 +137,8 @@ Each milestone ends with passing tests and a commit. Do them in order.
 ### M0: Packaging skeleton (done)
 
 - The package installs with `pip install -e .` and imports as `benchtare`.
-- `pytest` and `ruff` run clean in CI (GitHub Actions).
+- `pytest` and `ruff` run clean in CI (GitHub Actions). Since M4, CI runs the
+  tests on Linux, Windows and macOS, on every branch.
 
 ### M1: Interface description and signals (done)
 
@@ -339,9 +341,9 @@ Do not build these yet, even where the design brief describes them:
 - IDE setup for test development, such as editor schemas for the YAML files or
   run configurations (design brief, later stage 9). `benchtare init` (M7)
   writes the quickstart project only.
-- Supporting and testing Windows and macOS (design brief, later stage 11). CI
-  tests Linux only. Keep the code portable meanwhile: no Linux-only calls, and
-  paths through `pathlib`.
+- Platform-specific hardware support and setup guides (design brief, later
+  stage 11). The first slice is tested on Linux, Windows and macOS: keep it
+  portable, with no OS-specific calls and paths through `pathlib`.
 - Closed-loop or real-time simulation.
 
 ## Before the first release
