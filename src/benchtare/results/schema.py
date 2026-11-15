@@ -247,6 +247,16 @@ def transaction(db: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     db.execute("COMMIT")
 
 
+@contextmanager
+def _reading(db: sqlite3.Connection) -> Iterator[None]:
+    """Reads that see one snapshot of the file. Nothing is written."""
+    db.execute("BEGIN")  # deferred: the first read starts the read transaction
+    try:
+        yield
+    finally:
+        db.execute("ROLLBACK")
+
+
 def schema_version(db: sqlite3.Connection) -> int:
     return int(db.execute("PRAGMA user_version").fetchone()[0])
 
@@ -267,8 +277,12 @@ def _check_is_sqlite(path: Path) -> None:
 
 
 def _bring_up_to_date(db: sqlite3.Connection, path: Path) -> None:
-    # A first look without a write lock, so a file that isn't ours is refused untouched.
-    if _usable_version(db, path) == SCHEMA_VERSION:
+    # A first look without a write lock, so a file that isn't ours is refused untouched. The
+    # version and the tables are read as one snapshot: another run creating or upgrading the
+    # file between the two reads would otherwise make it look like someone else's file.
+    with _reading(db):
+        version = _usable_version(db, path)
+    if version == SCHEMA_VERSION:
         return
     # Then decide again holding the write lock: two runs starting together on a new or older
     # file must not both create or upgrade it. The second waits, then finds it done.

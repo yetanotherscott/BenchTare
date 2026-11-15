@@ -387,10 +387,25 @@ from benchtare.record import RecordEntry, RecordLevel
 from benchtare.results import schema
 from benchtare.results.store import RunInfo, SQLiteStore, TestResult
 
-path, ready, name, runs, workers, upgrade = sys.argv[1:]
+path, ready, name, runs, workers, mode = sys.argv[1:]
 ready = Path(ready)
 
-if upgrade == "upgrade":  # this BenchTare is a version newer, with an upgrade that takes time
+if mode == "slow-first-look" and name != "w0":
+    # A slow machine: the first worker creates the database while the others are part way
+    # through their first look at it.
+    read_version = schema.schema_version
+    looks = []
+
+    def slow_schema_version(db):
+        version = read_version(db)
+        if not looks:
+            looks.append(version)
+            time.sleep(0.3)
+        return version
+
+    schema.schema_version = slow_schema_version
+
+if mode == "upgrade":  # this BenchTare is a version newer, with an upgrade that takes time
 
     def add_notes(db):
         time.sleep(0.2)
@@ -421,8 +436,9 @@ for n in range(int(runs)):
 """.replace("TESTS", str(TESTS_PER_RUN))
 
 
-def run_together(tmp_path, path, *, workers=4, runs=1, upgrade=False):
-    """Start ``workers`` processes on one database at once; return each one's (exit, stderr)."""
+def run_together(tmp_path, path, *, workers=4, runs=1, mode="at-full-speed"):
+    """Start ``workers`` processes on one database at once; return each one's (exit, stderr).
+    ``mode`` is "at-full-speed", "slow-first-look" or "upgrade"."""
     script = tmp_path / "worker.py"
     script.write_text(WORKER, encoding="utf-8")
     ready = tmp_path / "ready"
@@ -437,7 +453,7 @@ def run_together(tmp_path, path, *, workers=4, runs=1, upgrade=False):
                 f"w{i}",
                 str(runs),
                 str(workers),
-                "upgrade" if upgrade else "same",
+                mode,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -450,8 +466,11 @@ def run_together(tmp_path, path, *, workers=4, runs=1, upgrade=False):
     return [(proc.wait(timeout=120), proc.communicate()[1]) for proc in started]
 
 
-def test_runs_starting_together_on_a_new_database_are_all_stored(tmp_path, path):
-    assert run_together(tmp_path, path, runs=5) == [(0, "")] * 4
+@pytest.mark.parametrize("mode", ["at-full-speed", "slow-first-look"])
+def test_runs_starting_together_on_a_new_database_are_all_stored(tmp_path, path, mode):
+    # With a slow first look, another run creates the tables between this run reading the
+    # version and listing the tables: both must come from one snapshot of the file.
+    assert run_together(tmp_path, path, runs=5, mode=mode) == [(0, "")] * 4
     db = sqlite3.connect(path)
     assert db.execute("SELECT count(*), sum(status = 'finished') FROM runs").fetchone() == (20, 20)
     assert db.execute("SELECT count(*) FROM test_results").fetchone() == (20 * TESTS_PER_RUN,)
@@ -466,7 +485,7 @@ def test_runs_upgrading_an_older_database_together_upgrade_it_once(tmp_path, pat
     store = SQLiteStore(path)
     store.start_run(run_info())
     store.close()
-    assert run_together(tmp_path, path, upgrade=True) == [(0, "")] * 4
+    assert run_together(tmp_path, path, mode="upgrade") == [(0, "")] * 4
     db = sqlite3.connect(path)
     assert schema.schema_version(db) == 2
     assert "notes" in tables(db)
