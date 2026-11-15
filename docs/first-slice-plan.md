@@ -175,15 +175,25 @@ Each milestone ends with passing tests and a commit. Do them in order.
   - two open `sim_can` benches can't hear each other;
   - a harness that connects a DUT input to a read-only channel is rejected.
 
-### M3: pytest plugin
+### M3: pytest plugin (done)
 
-- Register the plugin entry point in `pyproject.toml`.
+- Register the plugin entry point in `pyproject.toml`. pytest becomes a
+  runtime dependency, `pytest>=7.4`, and CI tests that floor as well as the
+  latest pytest.
 - Options `--dut`, `--bench` and `--harness`, plus the matching
   `benchtare_dut`, `benchtare_bench` and `benchtare_harness` ini settings,
   which also cover `[tool.pytest.ini_options]`.
-- Fixtures: `bench` and `signals`. With nothing configured, the plugin does
-  nothing, and asking for `bench` fails with a message saying what to set.
-- Record every read as a measurement, along with any `record_property` values.
+  - Command-line paths resolve from where pytest runs, and ini paths from the
+    ini file.
+  - The files are checked at start-up, and a wrong file is a usage error
+    before any test runs.
+- Fixtures: `bench` and `signals`, both session-scoped. The bench opens on
+  first use and closes when the run ends. With nothing configured, the plugin
+  does nothing, and asking for `bench` fails with a message saying what to
+  set.
+- Record every read as a measurement on each test report, by phase
+  (`report.benchtare_measurements`). `record_property` values stay in
+  `report.user_properties`. M5 stores both.
 - Tests (pytester):
   - a staging fixture and the example test from [model.md](model.md) pass
     against the reference;

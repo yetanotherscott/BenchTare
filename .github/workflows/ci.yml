@@ -33,3 +33,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: pytest
+
+  # BenchTare is a pytest plugin and promises pytest>=7.4: test that floor, not just the latest.
+  oldest-pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -e ".[dev]" "pytest==7.4.*"
+      - run: pytest --version
+      - run: pytest

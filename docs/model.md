@@ -230,13 +230,20 @@ import pytest
 @pytest.fixture
 def running(bench, signals):
     """The DUT has booted and is in run mode."""
-    bench.wait_until(signals.Mode, "standby", timeout=2.0)
+    bench.read(signals.Mode, timeout=2.0)  # it has booted once it reports a mode
     bench.write(signals.ModeRequest, "run")
     bench.wait_until(signals.Mode, "run", timeout=1.0)
 ```
 
 If a staging fixture fails, pytest reports an **error**, not a test failure. A
 DUT that never got ready is not counted against the test that needed it.
+
+**Staging starts from whatever state the DUT is in.** The bench is opened once
+per test run, and so is the DUT, real or simulated. The DUT keeps its state
+from one test to the next. A staging fixture must reach the state its test needs
+from any starting point. That's why the example waits for *a* mode report, not
+for `standby`: after a test that left the DUT running, it would never see
+`standby` again.
 
 ## Tests
 
@@ -300,8 +307,43 @@ DUT should refuse. BenchTare does not model faults specific to any DUT.
 Standard faults for standard interfaces, such as dropping or stopping a CAN
 message, may be added later as stimuli the bench can produce.
 
-Every value read is recorded with the result. So are any values a test adds
-with pytest's built-in `record_property`.
+Every value a test reads (`read`, or the value `wait_until` returns) is
+recorded with the result: the signal, the value, its unit and when it was read.
+This includes reads made by staging fixtures, kept apart by test phase. Values
+a test adds with pytest's built-in `record_property` are kept too.
+
+## Running the tests
+
+pytest needs the three files: the interface description, the bench file and the
+harness file. Give them on the command line:
+
+```
+pytest --dut reference.dut.yaml --bench bench-sim.yaml --harness harness-can.yaml
+```
+
+or in the ini file, so a plain `pytest` works:
+
+```toml
+# pyproject.toml
+[tool.pytest.ini_options]
+benchtare_dut = "reference.dut.yaml"
+benchtare_bench = "bench-sim.yaml"
+benchtare_harness = "harness-can.yaml"
+```
+
+- **Paths.** Command-line paths are relative to where pytest is run, and ini
+  paths to the ini file. The command line wins over the ini file.
+- **Header.** The run's header names the DUT, bench and harness it used.
+- **Checked at the start.** The files are loaded and checked when pytest
+  starts. A wrong file stops the run with its problems, before any test runs.
+- **Opened when needed.** The bench is opened the first time a test asks for
+  `bench`, and closed when the run ends. Tests that only use `signals` don't
+  open the equipment.
+- **All three or none.** Setting only some of the files is an error. Setting
+  none leaves BenchTare out of the run entirely, so installing it never
+  changes another project's tests.
+- **Clean failures.** When a check fails, the failure points at the test's own
+  line. BenchTare's internals are left out of the traceback.
 
 ## Proving the results can be trusted
 

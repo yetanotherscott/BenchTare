@@ -26,18 +26,19 @@ dependencies = [
     "PyYAML>=6.0",     # interface description, bench and harness files (M1)
     "cantools>=45.0",  # DBC import into the interface description (M1)
     "python-can>=4.6", # virtual CAN bus for the sim_can backend (M2); LGPL-3.0, unmodified
+    "pytest>=7.4",     # BenchTare is a pytest plugin (M3); CI tests this floor
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff"]
+dev = ["pytest>=7.4", "ruff"]
 
-# Add these when the modules exist (pytest11 in M3, the console script in M4):
+[project.entry-points.pytest11]
+benchtare = "benchtare.plugin"
+
+# Add this when the module exists (the console script, in M4):
 #
 # [project.scripts]
 # benchtare = "benchtare.cli:main"
-#
-# [project.entry-points.pytest11]
-# benchtare = "benchtare.plugin"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/benchtare"]

@@ -19,6 +19,7 @@ import numbers
 import os
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from benchtare.backends import BACKENDS
@@ -44,6 +45,19 @@ DEFAULT_TIMEOUT = 1.0
 # The key under which Bench.check() lists the simulation's own problems. It has a space, so it
 # can never be an equipment name.
 SIMULATION = "simulated DUT"
+
+
+@dataclass(frozen=True)
+class Measurement:
+    """A value a test read from the DUT, kept as evidence with the test's result."""
+
+    signal: str
+    value: Any
+    unit: str | None
+    at: float  # time.time() when it was read
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"signal": self.signal, "value": self.value, "unit": self.unit, "at": self.at}
 
 
 def open_bench(
@@ -83,6 +97,8 @@ class Bench:
         }
         self.simulation: Simulation | None = None
         self._open = False
+        # Called with every value read or waited for; the pytest plugin keeps them per test.
+        self.recorder: Callable[[Measurement], None] | None = None
 
     @property
     def signals(self) -> SignalSet:
@@ -143,6 +159,7 @@ class Bench:
         The value must be of a kind the signal has (see ``_kind_problem``); within that, any
         value the channel can carry is sent, however implausible.
         """
+        __tracebackhide__ = True
         binding = self._binding(signal)
         if not binding.drive:
             raise WriteError(
@@ -161,6 +178,7 @@ class Bench:
 
     def read(self, signal: Signal | str, timeout: float = DEFAULT_TIMEOUT) -> Any:
         """Return the first value of a DUT output received after the most recent write."""
+        __tracebackhide__ = True
         binding = self._readable(signal)
         _check_timeout(timeout)
         item = self._buffer.first_after_write(binding.key, timeout)
@@ -170,6 +188,7 @@ class Bench:
                 f"(on {binding.endpoint}){self._last_seen(binding.key)}",
                 hint=self._what_to_check(binding),
             )
+        self._record(binding, item.value)
         return item.value
 
     def wait_until(
@@ -180,6 +199,7 @@ class Bench:
     ) -> Any:
         """Wait for a value of a DUT output, received after the most recent write, that equals
         ``expected``, or for which ``expected`` returns true if it is a function. Return it."""
+        __tracebackhide__ = True
         binding = self._readable(signal)
         _check_timeout(timeout)
         matches: Callable[[Any], bool] = (
@@ -193,11 +213,13 @@ class Bench:
                 f"(on {binding.endpoint}){self._last_seen(binding.key)}",
                 hint=self._what_to_check(binding),
             )
+        self._record(binding, item.value)
         return item.value
 
     # --- helpers ----------------------------------------------------------------------------
 
     def _binding(self, signal: Signal | str) -> Binding:
+        __tracebackhide__ = True
         if not self._open:
             raise BenchError("the bench is not open", hint="open it with open_bench() first")
         name = signal.name if isinstance(signal, Signal) else str(signal)
@@ -217,6 +239,7 @@ class Bench:
         return binding
 
     def _readable(self, signal: Signal | str) -> Binding:
+        __tracebackhide__ = True
         binding = self._binding(signal)
         if binding.drive:
             raise BenchError(
@@ -224,6 +247,10 @@ class Bench:
                 hint=f"tests read DUT outputs; see the direction in {self.description.path.name}",
             )
         return binding
+
+    def _record(self, binding: Binding, value: Any) -> None:
+        if self.recorder is not None and binding.signal is not None:
+            self.recorder(Measurement(binding.key, value, binding.signal.unit, time.time()))
 
     def _last_seen(self, key: str) -> str:
         last = self._buffer.last(key)
@@ -272,6 +299,7 @@ def _is_predicate(expected: Any) -> bool:
 
 def _check_timeout(timeout: Any) -> None:
     """A timeout is a finite number of seconds, 0 or more. A bench never waits forever."""
+    __tracebackhide__ = True
     ok = (
         isinstance(timeout, numbers.Real)
         and not isinstance(timeout, bool)
