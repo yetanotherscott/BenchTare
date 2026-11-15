@@ -75,10 +75,19 @@ standards: []             # reserved: see below
 ```
 
 For an imported DBC signal, the direction comes from the DBC: a signal in a
-message the DUT's node sends is an `output`, and one in a message it receives
-is an `input`. An `overrides` entry can change that, and can also set a unit the
-DBC lacks. Signal names must be unique across all sources, and the error for a
-clash names both places it was defined.
+message the DUT's node sends is an `output`, and one the DUT's node receives is
+an `input`. Signals the DUT's node neither sends nor receives are not imported,
+so a DBC for a whole bus can be used as it is.
+
+An `overrides` entry can change an imported signal's `direction` or `unit`, or
+give it a new `name`. It names the signal by its DBC name, or as
+`Message.Signal` when the same name appears in more than one message. A
+numeric signal with no unit in the DBC needs one set here. Use `"1"` for a
+plain count.
+
+Signal names must be unique across all sources, and the error for a clash
+names both places it was defined. Names must be valid Python identifiers,
+because tests write `signals.<name>`.
 
 **Standards.** A DUT may support standard protocols, such as J1939, that require
 a defined set of messages. The `standards:` key will declare these, and

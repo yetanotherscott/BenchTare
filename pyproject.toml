@@ -22,8 +22,10 @@ classifiers = [
 ]
 
 # Runtime dependencies are added milestone by milestone (see docs/first-slice-plan.md).
-# The 0.0.1 placeholder has none, so that it installs cleanly and reserves the name.
-dependencies = []
+dependencies = [
+    "PyYAML>=6.0",     # interface description, bench and harness files (M1)
+    "cantools>=45.0",  # DBC import into the interface description (M1)
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff"]
