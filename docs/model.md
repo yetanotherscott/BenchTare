@@ -307,10 +307,8 @@ DUT should refuse. BenchTare does not model faults specific to any DUT.
 Standard faults for standard interfaces, such as dropping or stopping a CAN
 message, may be added later as stimuli the bench can produce.
 
-Every value a test reads (`read`, or the value `wait_until` returns) is
-recorded with the result: the signal, the value, its unit and when it was read.
-This includes reads made by staging fixtures, kept apart by test phase. Values
-a test adds with pytest's built-in `record_property` are kept too.
+Everything a test does at the bench, including what its staging fixtures do,
+goes into its test record. See "The test record" below.
 
 ## Running the tests
 
@@ -333,7 +331,8 @@ benchtare_harness = "harness-can.yaml"
 
 - **Paths.** Command-line paths are relative to where pytest is run, and ini
   paths to the ini file. The command line wins over the ini file.
-- **Header.** The run's header names the DUT, bench and harness it used.
+- **Header.** The run's header names the DUT, bench and harness it used, and
+  the test record level.
 - **Checked at the start.** The files are loaded and checked when pytest
   starts. A wrong file stops the run with its problems, before any test runs.
 - **Opened when needed.** The bench is opened the first time a test asks for
@@ -345,48 +344,88 @@ benchtare_harness = "harness-can.yaml"
 - **Clean failures.** When a check fails, the failure points at the test's own
   line. BenchTare's internals are left out of the traceback.
 
-## Logs
+## The test record
 
-BenchTare logs with Python's standard `logging`, under the `benchtare` logger,
-so pytest's own log options work with it.
+Each test gets a record of what happened at the bench while it ran. It is
+evidence about the DUT, kept with the test's result. It is separate from
+BenchTare's own log (below), and each has its own verbosity.
 
-- **A failed test shows what the bench did.** pytest prints it under
-  "Captured log", next to the failure: each write, each read with how long it
-  took, each timeout, and the CAN frames the bench sent. While BenchTare is
-  configured it sets its logger to `DEBUG` so this is captured, unless the
-  project has set a level for `benchtare` already.
-- **Live, or to a file.** `--log-cli-level=INFO` shows the files being loaded
-  and the bench opening and closing as the run goes; `DEBUG` adds every write
-  and read. `log_file` and `log_file_level = DEBUG` in the ini file keep a full
-  record of the run.
-- **Errors are raised, not logged.** A wrong file, a write the channel can't
-  carry and a read that times out are exceptions that say what failed and what
-  to check. The log adds the timeline around them.
-- **Failures in the background are logged and reported.** Equipment that stops
-  working between reads (a CAN bus that stops receiving, a sampler that stops)
-  is logged when it happens, and its `check()` reports it from then on. So the
-  next read that times out names the real cause, such as
-  `equipment 'can0' reports: stopped receiving: ...`, instead of suggesting
-  the DUT is unplugged.
-- **A received frame that doesn't match the DBC** is logged as a warning and
-  skipped, and the bus keeps receiving. Bad frames of the same ID are logged at
-  most once a second, with a count of the ones in between.
+| Level | What the record keeps |
+| --- | --- |
+| `results` | Every value read; every comparison (`wait_until`, with what it expected and what it got, and passing `assert` statements, see below); every timeout; each phase's outcome |
+| `stimuli` | Also every value written. This is the default |
+| `debug` | Also every CAN frame the bench sent, and every frame it received for a connected signal |
+
+Choose the level with `--bench-record=LEVEL`, or `benchtare_record` in the ini
+file.
+
+- **Unexpected events are recorded at every level.** A frame from the DUT that
+  doesn't match the DBC, and equipment that stops working during a test, are
+  always recorded, so no setting hides them. Every bad frame is recorded, not
+  just the first.
+- **They are also pytest warnings.** A test during which they happened gets a
+  `benchtare.FrameMismatchWarning` or `benchtare.EquipmentWarning`, listed in
+  the run's warnings summary. The test's outcome doesn't change, because pass
+  criteria live in the tests. To make such a test fail, run pytest with
+  `-W error::benchtare.FrameMismatchWarning`. Bad frames that arrive between
+  tests count against the next test. Any that arrive after the last test are
+  printed at the end of the run.
+- **Only connected messages are checked.** The bench decodes the messages that
+  carry a signal the harness connects. A frame for any other message isn't
+  checked against the DBC.
+- **A failed test shows its record**, phase by phase, after the failure. Add
+  `-rP` to see the records of passing tests too.
+
+```
+---------------------------- BenchTare record setup ----------------------------
+10:38:35.195 read Mode = 'standby' on can0 after 0.100 s
+10:38:35.195 write ModeRequest = 'run' on can0
+10:38:35.205 wait_until Mode, expecting 'run': got 'run' on can0 after 0.010 s
+10:38:35.205 setup passed
+---------------------------- BenchTare record call -----------------------------
+10:38:35.206 write Setpoint = 42.0 degC on can0
+10:38:35.506 wait_until Measured, expecting 99.0 ± 0.5: not reached within 0.3 s on can0; last value 42.0 degC
+10:38:35.531 call failed: benchtare.backends.base.ReadTimeout: Measured did not reach 99.0 ± 0.5 within 0.3 s (on can0); last value 42.0, 0.28 s ago
+```
+
+- **Each report carries its phase's record** as `report.benchtare_record`: a
+  list of plain dicts with the kind of entry, its level, the time, the text, and
+  the facts (signal, value, unit, channel, and so on). M5 stores them with the
+  results.
+- **Passing asserts** are recorded when the ini file sets pytest's
+  `enable_assertion_pass_hook = true`. Without it, the record has the values a
+  test read and its outcome, but not each comparison a plain `assert` made.
+  pytest caches rewritten test files, so clear `__pycache__` after changing the
+  setting.
+- Values a test adds with pytest's `record_property` stay in
+  `report.user_properties`.
+
+## BenchTare's own log
+
+BenchTare also logs with Python's standard `logging`, under the `benchtare`
+logger. That log is for debugging BenchTare itself: loading files, opening and
+closing equipment, receive threads. pytest's own options set its verbosity:
+`--log-level`, `--log-cli-level=INFO` to watch it live, or `log_file` with
+`log_file_level = DEBUG` to keep it. BenchTare doesn't turn it up.
 
 | Level | What is logged |
 | --- | --- |
-| `DEBUG` | Each write, read and `wait_until`, with the value, unit and channel; timeouts; each CAN frame the bench sends; the DBC signals an import skipped |
+| `DEBUG` | Each CAN frame a backend sends; virtual buses opened and closed; the DBC signals an import skipped; frames that don't match the DBC, at most once a second per frame ID |
 | `INFO` | Each file loaded, with what it holds and what each DBC import took; the bench opening and closing; the simulated DUT starting and stopping; simulated failures and cut wires |
-| `WARNING` | A received CAN frame that doesn't match the DBC |
-| `ERROR` | Equipment that stopped working in the background, and an action of the simulated DUT that failed, with its traceback |
+| `WARNING` | Unexpected events when nothing is keeping a test record (a script using `open_bench` without pytest); a frame the simulated DUT couldn't decode |
+| `ERROR` | Equipment that stopped working in the background; an action of the simulated DUT that failed, with its traceback |
 
-A failed test's report then reads like this:
-
-```
------------------------------- Captured log call -------------------------------
-DEBUG    benchtare.bench.runtime:runtime.py:190 write Setpoint = 42.0 degC on can0
-DEBUG    benchtare.backends.sim_can:sim_can.py:154 can0: sent Command 0x100 [8] a4 01 01 00 00 00 00 00
-DEBUG    benchtare.bench.runtime:runtime.py:236 wait_until Measured on can0: 99.0 ± 0.5 not reached within 0.3 s
-```
+- **Errors are raised, not logged.** A wrong file, a write the channel can't
+  carry and a read that times out are exceptions that say what failed and what
+  to check.
+- **Failures in the background are logged and reported.** Equipment that stops
+  working between reads (a CAN bus that stops receiving, a sampler that stops)
+  is logged when it happens, goes into the test record, and its `check()`
+  reports it from then on. So the next read that times out names the real
+  cause, such as `equipment 'can0' reports: stopped receiving: ...`, instead
+  of suggesting the DUT is unplugged.
+- **A frame that doesn't match the DBC is skipped**, and the bus keeps
+  receiving. One bad frame never stops the bench from reading the rest.
 
 ## Proving the results can be trusted
 
@@ -429,7 +468,7 @@ whether it has changed since.
 Every session is recorded in a local SQLite database (`.benchtare/` by
 default), using a versioned schema. Each run stores:
 
-- each test's outcome, duration and the values it read;
+- each test's outcome, duration and test record;
 - a **manifest**: the BenchTare and Python versions, a timestamp, and hashes of
   the interface description, its DBC files, the bench file, the harness file
   and each test file.

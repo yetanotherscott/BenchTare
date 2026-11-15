@@ -7,7 +7,9 @@ process never hear each other, unless the bench file fixes the name with ``bus:`
 Like a real interface, the bus carries CAN FD frames only when it is opened in FD mode.
 
 Frames are received on a thread of their own (see ``FrameReceiver``). A frame that doesn't
-match the DBC is logged and skipped; if the bus fails, ``check()`` reports it.
+match the DBC is put in the test record and skipped, and reception goes on. If the bus fails,
+that goes in the test record too, and ``check()`` reports it. At the debug level, the test
+record also gets every frame sent and every frame received for a connected signal.
 
 Bench file:
 
@@ -30,15 +32,25 @@ from benchtare._yaml import kind_of
 from benchtare.backends._can_codec import (
     CanCodec,
     CarryError,
+    FrameError,
     FrameReceiver,
     describe_frame,
     frame,
+    frame_facts,
     frame_key,
     open_virtual_bus,
     to_python,
 )
 from benchtare.backends.base import Binding, ChannelCaps, EquipmentKind, Receiver, WriteError
 from benchtare.errors import Problem
+from benchtare.record import (
+    EQUIPMENT_FAILURE,
+    FRAME_MISMATCH,
+    FRAME_RECEIVED,
+    FRAME_SENT,
+    RecordEntry,
+    RecordLevel,
+)
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +112,13 @@ class SimCan:
             self._rx.setdefault(binding.can.frame_key, []).append((message, binding))
         self.bus_name = self._fixed_bus_name or f"benchtare-{self.equipment}-{uuid.uuid4().hex}"
         self._bus = open_virtual_bus(self.bus_name, fd=self.fd)
-        self._frames = FrameReceiver(self._bus, self._on_frame, who=self.equipment)
+        self._frames = FrameReceiver(
+            self._bus,
+            self._on_frame,
+            who=self.equipment,
+            bad_frame_level=logging.DEBUG,  # the test record has every one
+            on_failure=self._on_receive_failure,
+        )
         self._frames.start()
         log.debug(
             "%s: opened virtual CAN bus %s%s",
@@ -152,6 +170,14 @@ class SimCan:
         sent = frame(ref, data)
         self._bus.send(sent)
         log.debug("%s: sent %s %s", self.equipment, ref.message, describe_frame(sent))
+        if self._receiver is not None and self._receiver.wants(RecordLevel.DEBUG):
+            self._note(
+                FRAME_SENT,
+                RecordLevel.DEBUG,
+                f"{self.equipment}: sent {ref.message} {describe_frame(sent)}",
+                message=ref.message,
+                **frame_facts(sent),
+            )
 
     def fail(self, reason: str = "simulated equipment failure") -> None:
         """Simulate a failed CAN interface: check() reports it, and nothing passes."""
@@ -163,14 +189,43 @@ class SimCan:
         receiver = self._receiver
         if not listening or receiver is None or self._failure is not None:
             return
+        if receiver.wants(RecordLevel.DEBUG):
+            self._note(
+                FRAME_RECEIVED,
+                RecordLevel.DEBUG,
+                f"{self.equipment}: received {listening[0][0].name} {describe_frame(received)}",
+                message=listening[0][0].name,
+                **frame_facts(received),
+            )
         decoded_by_message: dict[int, dict[str, Any]] = {}
         for message, binding in listening:
             assert binding.can is not None
             decoded = decoded_by_message.get(id(message))
             if decoded is None:
-                decoded = decoded_by_message[id(message)] = self._codec.decode(
-                    message, bytes(received.data)
-                )
+                try:
+                    decoded = self._codec.decode(message, bytes(received.data))
+                except FrameError as exc:
+                    self._note(
+                        FRAME_MISMATCH,
+                        RecordLevel.RESULTS,
+                        f"{self.equipment}: the DUT sent a frame that doesn't match the DBC: "
+                        f"{describe_frame(received)}: {exc}",
+                        message=message.name,
+                        problem=str(exc),
+                        **frame_facts(received),
+                    )
+                    raise  # FrameReceiver logs it and skips the frame
+                decoded_by_message[id(message)] = decoded
             if binding.can.signal in decoded:
                 signal_type = binding.signal.type if binding.signal else None
                 receiver.deliver(binding.key, to_python(signal_type, decoded[binding.can.signal]))
+
+    def _on_receive_failure(self, failure: str) -> None:
+        self._note(
+            EQUIPMENT_FAILURE, RecordLevel.RESULTS, f"{self.equipment} {failure}", problem=failure
+        )
+
+    def _note(self, kind: str, level: RecordLevel, text: str, **data: Any) -> None:
+        receiver = self._receiver
+        if receiver is not None and (level is RecordLevel.RESULTS or receiver.wants(level)):
+            receiver.note(RecordEntry(kind, level, text, {"equipment": self.equipment, **data}))

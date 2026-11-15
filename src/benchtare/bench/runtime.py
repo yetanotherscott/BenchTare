@@ -9,6 +9,10 @@ It routes each signal through the harness to its equipment and backend.
   satisfies it, if it is a predicate). Use it to check how the DUT reacts: a DUT that reports
   cyclically, or a sampled channel, can still deliver the old value just after a write.
 
+Each call goes into the test record (``benchtare.record``) through ``recorder``, which the
+pytest plugin sets; so does anything unexpected a backend sees. With no recorder, unexpected
+events are logged as warnings instead, so they are never lost.
+
 See docs/model.md.
 """
 
@@ -20,7 +24,6 @@ import numbers
 import os
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from benchtare.backends import BACKENDS
@@ -35,6 +38,7 @@ from benchtare.backends.base import (
 from benchtare.bench.config import BenchConfig, load_bench_file
 from benchtare.dut.description import InterfaceDescription, load_interface_description
 from benchtare.harness.config import HarnessConfig, load_harness_file
+from benchtare.record import DEFAULT_LEVEL, READ, WAIT, WRITE, RecordEntry, RecordLevel
 from benchtare.signals.model import Direction, Signal, SignalSet, SignalType
 from benchtare.sim.simulation import Simulation
 
@@ -48,19 +52,6 @@ DEFAULT_TIMEOUT = 1.0
 # The key under which Bench.check() lists the simulation's own problems. It has a space, so it
 # can never be an equipment name.
 SIMULATION = "simulated DUT"
-
-
-@dataclass(frozen=True)
-class Measurement:
-    """A value a test read from the DUT, kept as evidence with the test's result."""
-
-    signal: str
-    value: Any
-    unit: str | None
-    at: float  # time.time() when it was read
-
-    def as_dict(self) -> dict[str, Any]:
-        return {"signal": self.signal, "value": self.value, "unit": self.unit, "at": self.at}
 
 
 def open_bench(
@@ -100,8 +91,21 @@ class Bench:
         }
         self.simulation: Simulation | None = None
         self._open = False
-        # Called with every value read or waited for; the pytest plugin keeps them per test.
-        self.recorder: Callable[[Measurement], None] | None = None
+        # The test record. The pytest plugin sets the recorder and keeps the entries per test.
+        self.recorder: Callable[[RecordEntry], None] | None = None
+        self._record_level = DEFAULT_LEVEL
+        self._buffer.note_level = DEFAULT_LEVEL
+        self._buffer.on_note = self._note
+
+    @property
+    def record_level(self) -> RecordLevel:
+        """Which entries go to the recorder. Unexpected events always do."""
+        return self._record_level
+
+    @record_level.setter
+    def record_level(self, level: RecordLevel) -> None:
+        self._record_level = level
+        self._buffer.note_level = level
 
     @property
     def signals(self) -> SignalSet:
@@ -187,7 +191,14 @@ class Bench:
             message, hint = problem
             raise WriteError(f"can't write {binding.key} = {value!r}: {message}", hint=hint)
         backend = self._backends[binding.equipment]
-        log.debug("write %s = %s on %s", binding.key, _shown(binding, value), binding.endpoint)
+        self._note(
+            RecordEntry(
+                WRITE,
+                RecordLevel.STIMULI,
+                f"write {binding.key} = {_shown(binding, value)} on {binding.endpoint}",
+                _facts(binding, value),
+            )
+        )
         with self._buffer.writing():
             backend.write(binding, value)
 
@@ -198,21 +209,30 @@ class Bench:
         _check_timeout(timeout)
         started = time.monotonic()
         item = self._buffer.first_after_write(binding.key, timeout)
+        waited = time.monotonic() - started
         if item is None:
-            log.debug("read %s on %s: nothing within %g s", binding.key, binding.endpoint, timeout)
+            self._note(
+                RecordEntry(
+                    READ,
+                    RecordLevel.RESULTS,
+                    f"read {binding.key}: nothing within {timeout:g} s on {binding.endpoint}",
+                    {**_facts(binding, None), "outcome": "timeout", "timeout": timeout},
+                )
+            )
             raise ReadTimeout(
                 f"no value of {binding.key} arrived within {timeout:g} s after the last write "
                 f"(on {binding.endpoint}){self._last_seen(binding.key)}",
                 hint=self._what_to_check(binding),
             )
-        log.debug(
-            "read %s = %s on %s (after %.3f s)",
-            binding.key,
-            _shown(binding, item.value),
-            binding.endpoint,
-            time.monotonic() - started,
+        self._note(
+            RecordEntry(
+                READ,
+                RecordLevel.RESULTS,
+                f"read {binding.key} = {_shown(binding, item.value)} on {binding.endpoint} "
+                f"after {waited:.3f} s",
+                {**_facts(binding, item.value), "outcome": "value", "waited": waited},
+            )
         )
-        self._record(binding, item.value)
         return item.value
 
     def wait_until(
@@ -229,30 +249,47 @@ class Bench:
         matches: Callable[[Any], bool] = (
             expected if _is_predicate(expected) else (lambda value: value == expected)
         )
+        want = getattr(expected, "__name__", None) if _is_predicate(expected) else None
+        expecting = want or repr(expected)
         started = time.monotonic()
         item = self._buffer.wait_for_match(binding.key, matches, timeout)
+        waited = time.monotonic() - started
         if item is None:
-            want = getattr(expected, "__name__", None) if _is_predicate(expected) else None
-            log.debug(
-                "wait_until %s on %s: %s not reached within %g s",
-                binding.key,
-                binding.endpoint,
-                want or repr(expected),
-                timeout,
+            last = self._buffer.last(binding.key)
+            seen = f"last value {_shown(binding, last.value)}" if last else "nothing received"
+            self._note(
+                RecordEntry(
+                    WAIT,
+                    RecordLevel.RESULTS,
+                    f"wait_until {binding.key}, expecting {expecting}: not reached within "
+                    f"{timeout:g} s on {binding.endpoint}; {seen}",
+                    {
+                        **_facts(binding, last.value if last else None),
+                        "expected": expecting,
+                        "outcome": "timeout",
+                        "timeout": timeout,
+                    },
+                )
             )
             raise ReadTimeout(
-                f"{binding.key} did not reach {want or repr(expected)} within {timeout:g} s "
+                f"{binding.key} did not reach {expecting} within {timeout:g} s "
                 f"(on {binding.endpoint}){self._last_seen(binding.key)}",
                 hint=self._what_to_check(binding),
             )
-        log.debug(
-            "wait_until %s = %s on %s (after %.3f s)",
-            binding.key,
-            _shown(binding, item.value),
-            binding.endpoint,
-            time.monotonic() - started,
+        self._note(
+            RecordEntry(
+                WAIT,
+                RecordLevel.RESULTS,
+                f"wait_until {binding.key}, expecting {expecting}: got "
+                f"{_shown(binding, item.value)} on {binding.endpoint} after {waited:.3f} s",
+                {
+                    **_facts(binding, item.value),
+                    "expected": expecting,
+                    "outcome": "reached",
+                    "waited": waited,
+                },
+            )
         )
-        self._record(binding, item.value)
         return item.value
 
     # --- helpers ----------------------------------------------------------------------------
@@ -287,9 +324,15 @@ class Bench:
             )
         return binding
 
-    def _record(self, binding: Binding, value: Any) -> None:
-        if self.recorder is not None and binding.signal is not None:
-            self.recorder(Measurement(binding.key, value, binding.signal.unit, time.time()))
+    def _note(self, entry: RecordEntry) -> None:
+        """Pass an entry to the recorder if the record level keeps it. Any thread may call it."""
+        recorder = self.recorder
+        if recorder is None:
+            if entry.unexpected:
+                log.warning("%s", entry.text)  # nothing is recording it, so it must not vanish
+            return
+        if entry.unexpected or entry.level <= self._record_level:
+            recorder(entry)
 
     def _last_seen(self, key: str) -> str:
         last = self._buffer.last(key)
@@ -329,6 +372,11 @@ def _bindings(description: InterfaceDescription, harness: HarnessConfig) -> dict
                 key=key, equipment=endpoint.equipment, channel=endpoint.channel, drive=drive
             )
     return bindings
+
+
+def _facts(binding: Binding, value: Any) -> dict[str, Any]:
+    unit = binding.signal.unit if binding.signal is not None else None
+    return {"signal": binding.key, "value": value, "unit": unit, "endpoint": binding.endpoint}
 
 
 def _shown(binding: Binding, value: Any) -> str:

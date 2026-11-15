@@ -81,6 +81,7 @@ benchtare/
 │   ├── scaffold/
 │   │   └── quickstart/      # what `benchtare init` writes
 │   ├── requirements/        # optional, milestone M8
+│   ├── record.py            # the test record: levels, entries
 │   ├── plugin.py            # pytest plugin: options, fixtures, hooks
 │   └── cli.py               # init, selftest, check-tests, report
 └── tests/                   # BenchTare's own tests, run against the reference
@@ -125,7 +126,7 @@ implementations without changing them.
     (`sim/simulation.py`), which wires the simulated DUT to the simulated
     equipment.
 - **`ResultStore`** (`results/store.py`): `start_run(manifest)`,
-  `record(test_id, outcome, measurements, requirement_ids)`, `finish_run()`.
+  `record(test_id, outcome, test_record, requirement_ids)`, `finish_run()`.
   SQLite is the only implementation in this slice.
 
 ## Order of work
@@ -191,9 +192,9 @@ Each milestone ends with passing tests and a commit. Do them in order.
   first use and closes when the run ends. With nothing configured, the plugin
   does nothing, and asking for `bench` fails with a message saying what to
   set.
-- Record every read as a measurement on each test report, by phase
-  (`report.benchtare_measurements`). `record_property` values stay in
-  `report.user_properties`. M5 stores both.
+- Record every read as a measurement on each test report, by phase. (Since
+  replaced by the test record, `report.benchtare_record`.) `record_property`
+  values stay in `report.user_properties`. M5 stores both.
 - Tests (pytester):
   - a staging fixture and the example test from [model.md](model.md) pass
     against the reference;
@@ -201,24 +202,36 @@ Each milestone ends with passing tests and a commit. Do them in order.
   - nothing happens when nothing is configured.
   - Tests that use `sim_can` run with `runpytest_subprocess`.
 
-### Logging (done, between M3 and M4)
+### Test record and logging (done, between M3 and M4)
 
-- Standard `logging` under the `benchtare` logger; no new dependency. See
-  "Logs" in [model.md](model.md) for what is logged at each level.
-- The plugin sets the `benchtare` logger to `DEBUG` while it is configured (and
-  restores it afterwards), so a failed test's report shows the bench's writes
-  and reads. The three files are loaded at session start, not in
-  `pytest_configure`, so pytest's live log and log file capture the loading.
+- **The test record** (`record.py`): what happened at the bench during each
+  test, with three levels: `results` (readings, comparisons, outcomes),
+  `stimuli` (also writes; the default) and `debug` (also frames). Set with
+  `--bench-record` or `benchtare_record`. Kept per phase on each report as
+  `report.benchtare_record`, which replaces the M3 measurements list, and shown
+  with a failed test. Passing asserts are recorded when pytest's
+  `enable_assertion_pass_hook` is on. See "The test record" in
+  [model.md](model.md).
+- **Unexpected events are never hidden.** A frame from the DUT that doesn't
+  match the DBC, and equipment that stops working, are recorded at every level
+  and raised as pytest warnings for the test (`FrameMismatchWarning`,
+  `EquipmentWarning`). The outcome is unchanged; `-W error::...` makes them
+  fail. Events between tests go to the next test; after the last, to the end of
+  the run.
+- **BenchTare's own log**: standard `logging` under `benchtare`, for debugging
+  BenchTare, with pytest's usual log options. The three files are loaded at
+  session start, not in `pytest_configure`, so pytest's live log and log file
+  capture the loading. No new dependency.
 - CAN frames are received on BenchTare's own thread (`FrameReceiver`) instead
   of python-can's `Notifier`. A frame the handler can't decode, such as a
   multiplexer value the DBC doesn't define, used to end reception for the rest
-  of the run with nothing said. Now it is logged and skipped. A bus failure
-  stops reception, is logged, and is reported by `check()`. The same goes for
-  the `sim` sampler and the simulated DUT's CAN port.
-- Tests: what each part logs; a healthy run logs no warnings and leaves no
-  threads; a failed bus, a failed DUT port, a failed sampler, a frame that
-  doesn't match the DBC and an error handling a frame are each caught; the
-  plugin's level is set, kept when the project sets one, and restored.
+  of the run with nothing said. Now it is recorded and skipped. A bus failure
+  stops reception, is logged and recorded, and is reported by `check()`. The
+  same goes for the `sim` sampler and the simulated DUT's CAN port.
+- Tests: what each level keeps; every bad frame recorded; warnings per test,
+  between tests and after the last; `-W error` makes them fail; a failed test
+  shows its record; a failed bus, DUT port and sampler are each caught; a
+  healthy run logs no warnings and leaves no threads.
 
 ### M4: Self-test
 

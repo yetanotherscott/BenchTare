@@ -2,7 +2,9 @@
 
 A backend drives one kind of bench equipment. It is told which signals (and loopback ends) are
 bound to its channels, writes values to them, and delivers every value it receives to the
-bench's receive buffer. It never interprets values: pass criteria live in the tests.
+bench's receive buffer. It never interprets values: pass criteria live in the tests. It also
+notes, for the test record, anything unexpected it sees (a frame that doesn't match the DBC,
+equipment that stopped working) and, for the debug level, the frames it sends and receives.
 
 The read rule: ``Bench.read`` returns the first value received after the bench's most recent
 write. Writes and deliveries share one lock, so a value delivered while a write is in progress
@@ -22,6 +24,7 @@ from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from benchtare.dut.description import CanSignalRef
 from benchtare.errors import BenchTareError, Problem
+from benchtare.record import RecordEntry, RecordLevel
 from benchtare.signals.model import Signal
 
 EquipmentKind = Literal["channels", "bus"]
@@ -81,6 +84,14 @@ class Receiver(Protocol):
     lock: threading.RLock
 
     def deliver(self, key: str, value: Any) -> None: ...
+
+    def note(self, entry: RecordEntry) -> None:
+        """Add an entry to the test record. Callable from any thread."""
+        ...
+
+    def wants(self, level: RecordLevel) -> bool:
+        """Whether the test record keeps entries of ``level``; skip building them if not."""
+        ...
 
 
 @runtime_checkable
@@ -146,6 +157,17 @@ class ReceiveBuffer:
         self._since_write: dict[str, deque[Received]] = {}
         self._first: dict[str, Received] = {}
         self._last: dict[str, Received] = {}
+        # The bench's handler for test-record entries that backends note, and the level it keeps.
+        self.on_note: Callable[[RecordEntry], None] | None = None
+        self.note_level = RecordLevel.RESULTS
+
+    def note(self, entry: RecordEntry) -> None:
+        handler = self.on_note
+        if handler is not None:
+            handler(entry)
+
+    def wants(self, level: RecordLevel) -> bool:
+        return self.on_note is not None and level <= self.note_level
 
     @contextmanager
     def writing(self) -> Iterator[None]:

@@ -62,6 +62,7 @@ Use these names consistently in code, docs and messages.
 | Self-test | The bench check and harness check that run before each session |
 | Test check | The on-demand run that corrupts readings to prove each test can fail |
 | Reference | The simulated DUT, bench and harness that ship with the package |
+| Test record | What happened at the bench during a test, kept with its result: readings, comparisons and outcomes, then stimuli, then frames |
 | Manifest | The record of what a run tested: versions and file hashes |
 | Trace report | The report linking requirements, tests and results (M8) |
 
@@ -80,10 +81,13 @@ Use these names consistently in code, docs and messages.
   migration or a version bump, never a silent change.
 - Error messages are for a tired engineer at a bench: say what failed, which
   file and signal, and what to check.
-- Log with `logging.getLogger(__name__)`, so everything is under `benchtare`.
-  Raise errors rather than logging them. Log the timeline (writes, reads) at
-  `DEBUG`, and log anything that fails on a background thread where `check()`
-  can also report it. See "Logs" in `docs/model.md`.
+- Two records, kept apart. What happened at the bench during a test (reads,
+  comparisons, writes, frames, anything unexpected) goes into the test record,
+  and unexpected events are recorded at every level. BenchTare's own log is for
+  debugging BenchTare: `logging.getLogger(__name__)`, under `benchtare`. Raise
+  errors rather than logging them, and log anything that fails on a background
+  thread where `check()` can also report it. See "The test record" in
+  `docs/model.md`.
 - BenchTare never judges a signal's value. Pass criteria live in test
   assertions, and any value a channel can carry may be written.
 - Commit messages and PR descriptions carry no Claude attribution: no

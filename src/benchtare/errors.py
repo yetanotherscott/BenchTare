@@ -14,6 +14,21 @@ class BenchTareError(Exception):
     """Base class for errors that are reported to the user rather than as tracebacks."""
 
 
+class BenchTareWarning(UserWarning):
+    """Base class for BenchTare's warnings about what happened at the bench during a test."""
+
+
+class FrameMismatchWarning(BenchTareWarning):
+    """The DUT sent CAN frames that don't match the DBC. Every one is in the test record.
+
+    To make such a test fail, run pytest with ``-W error::benchtare.FrameMismatchWarning``.
+    """
+
+
+class EquipmentWarning(BenchTareWarning):
+    """Bench equipment stopped working during a test."""
+
+
 @dataclass(frozen=True)
 class Problem:
     """One thing wrong with a file, and what to check."""

@@ -1,6 +1,6 @@
 """The pytest plugin, tested with pytester against the reference DUT."""
 
-import logging
+import re
 import shutil
 import textwrap
 import threading
@@ -83,7 +83,7 @@ def test_report_header_names_the_dut_bench_and_harness(project):
     result = project.runpytest(*cli())
     header = (
         "benchtare: DUT reference (reference.dut.yaml), bench laptop-sim (bench-sim.yaml), "
-        "harness reference-io (harness-io.yaml)"
+        "harness reference-io (harness-io.yaml); test record: stimuli"
     )
     result.stdout.fnmatch_lines([header])
 
@@ -91,7 +91,13 @@ def test_report_header_names_the_dut_bench_and_harness(project):
 def test_options_are_listed_in_help(pytester):
     result = pytester.runpytest("--help")
     result.stdout.fnmatch_lines(
-        ["*BenchTare: test a DUT on a bench*", "*--dut=FILE*", "*--bench=FILE*", "*--harness=FILE*"]
+        [
+            "*BenchTare: test a DUT on a bench*",
+            "*--dut=FILE*",
+            "*--bench=FILE*",
+            "*--harness=FILE*",
+            "*--bench-record=LEVEL*",
+        ]
     )
 
 
@@ -280,44 +286,7 @@ def test_bench_is_closed_when_the_run_ends(project):
     assert no_reference_threads()
 
 
-# --- measurements ---------------------------------------------------------------------------------
-
-
-def test_reads_are_recorded_on_each_report(project):
-    project.makepyfile(
-        test_setpoint="""
-        import pytest
-
-        def test_setpoint_is_tracked(running, bench, signals, record_property):
-            bench.write(signals.Setpoint, 42.0)
-            bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
-            record_property("operator_note", "first run")
-        """
-    )
-    recorder = project.inline_run(*cli())
-    reports = {
-        r.when: r
-        for r in recorder.getreports("pytest_runtest_logreport")
-        if r.nodeid.endswith("test_setpoint_is_tracked")
-    }
-    setup = reports["setup"].benchtare_measurements
-    call = reports["call"].benchtare_measurements
-    assert [m["signal"] for m in setup] == ["Mode", "Mode"]  # staging: booted, then run
-    assert setup[-1]["value"] == "run"
-    assert [(m["signal"], m["value"], m["unit"]) for m in call] == [("Measured", 42.0, "degC")]
-    assert isinstance(call[0]["at"], float)
-    assert ("operator_note", "first run") in reports["call"].user_properties
-    assert reports["teardown"].benchtare_measurements == []
-
-
-def test_reports_without_bench_have_no_measurements(project):
-    project.makepyfile(test_setpoint="def test_plain():\n    pass\n")
-    recorder = project.inline_run(*cli())
-    (call,) = [r for r in recorder.getreports("pytest_runtest_logreport") if r.when == "call"]
-    assert call.benchtare_measurements == []
-
-
-# --- logging --------------------------------------------------------------------------------------
+# --- the test record -----------------------------------------------------------------------------
 
 FAILING_TEST = """
 import pytest
@@ -328,20 +297,302 @@ def test_setpoint_is_tracked(running, bench, signals):
 """
 
 
-def test_a_failed_test_shows_what_the_bench_did(project):
+def reports_of(recorder, name):
+    return {
+        r.when: r
+        for r in recorder.getreports("pytest_runtest_logreport")
+        if r.nodeid.endswith(name)
+    }
+
+
+def test_each_report_carries_the_record_of_its_phase(project):
+    project.makepyfile(
+        test_setpoint="""
+        import pytest
+
+        def test_setpoint_is_tracked(running, bench, signals, record_property):
+            bench.write(signals.Setpoint, 42.0)
+            bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
+            record_property("operator_note", "first run")
+        """
+    )
+    reports = reports_of(project.inline_run(*cli()), "test_setpoint_is_tracked")
+    setup = reports["setup"].benchtare_record
+    assert [e["kind"] for e in setup] == ["read", "write", "wait_until", "result"]
+    assert setup[-1]["text"] == "setup passed"
+    call = reports["call"].benchtare_record
+    assert [(e["kind"], e.get("signal"), e.get("value")) for e in call] == [
+        ("write", "Setpoint", 42.0),
+        ("wait_until", "Measured", 42.0),
+        ("result", None, None),
+    ]
+    assert call[1]["unit"] == "degC" and isinstance(call[1]["at"], float)
+    assert call[-1] | {"at": 0} == {
+        "kind": "result",
+        "level": "results",
+        "at": 0,
+        "text": "call passed",
+        "phase": "call",
+        "outcome": "passed",
+    }
+    assert ("operator_note", "first run") in reports["call"].user_properties
+    assert [e["text"] for e in reports["teardown"].benchtare_record] == ["teardown passed"]
+
+
+def test_a_test_without_the_bench_records_only_its_results(project):
+    project.makepyfile(test_setpoint="def test_plain():\n    pass\n")
+    reports = reports_of(project.inline_run(*cli()), "test_plain")
+    assert [e["text"] for e in reports["call"].benchtare_record] == ["call passed"]
+
+
+def test_a_failed_test_shows_its_record(project):
     project.makepyfile(test_setpoint=FAILING_TEST)
     result = project.runpytest(*cli())
     result.assert_outcomes(failed=1)
     result.stdout.fnmatch_lines(
         [
-            "*Captured log setup*",
-            "*bench laptop-sim open: equipment can0 (sim_can), io (sim)*",
-            "*write ModeRequest = 'run' on io.out2*",
-            "*Captured log call*",
-            "*write Setpoint = 42.0 degC on io.out1*",
-            "*wait_until Measured on io.in1: 99.0 ± * not reached within 0.3 s*",
+            "*- BenchTare record setup -*",
+            "??:??:??.??? read Mode = * on io.in2 after *",
+            "??:??:??.??? write ModeRequest = 'run' on io.out2",
+            "??:??:??.??? wait_until Mode, expecting 'run': got 'run' on io.in2 after *",
+            "??:??:??.??? setup passed",
+            "*- BenchTare record call -*",
+            "??:??:??.??? write Setpoint = 42.0 degC on io.out1",
+            (
+                "??:??:??.??? wait_until Measured, expecting 99.0 ± *: not reached within 0.3 s on "
+                "io.in1; last value 42.0 degC"
+            ),
+            "??:??:??.??? call failed: *Measured did not reach 99.0*",
         ]
     )
+    # BenchTare's own log is separate, and isn't turned up for the test record.
+    assert "Captured log" not in result.stdout.str()
+
+
+def test_passing_tests_do_not_show_their_record(project):
+    result = project.runpytest(*cli())
+    result.assert_outcomes(passed=2)
+    assert "BenchTare record" not in result.stdout.str()
+
+
+def test_record_level_results_leaves_out_writes(project):
+    project.makepyfile(test_setpoint=FAILING_TEST)
+    result = project.runpytest(*cli(), "--bench-record=results")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        ["*test record: results*", "*BenchTare record call*", "*wait_until Measured, expecting*"]
+    )
+    assert "write Setpoint" not in result.stdout.str()
+
+
+def test_record_level_debug_adds_frames(project):
+    project.makepyfile(test_setpoint=FAILING_TEST)
+    result = project.runpytest_subprocess(*cli(reference.HARNESS_CAN), "--bench-record=debug")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*BenchTare record call*",
+            "??:??:??.??? write Setpoint = 42.0 degC on can0",
+            "??:??:??.??? can0: sent Command 0x100 [[]8] a4 01 01 00 00 00 00 00",
+            "??:??:??.??? can0: received Status 0x101 [[]8] a4 01 00 00 00 00 00 00",
+        ]
+    )
+
+
+def test_record_level_can_be_set_in_the_ini_file(project):
+    project.makeini("[pytest]\nbenchtare_record = results\n")
+    result = project.runpytest(*cli())
+    result.stdout.fnmatch_lines(["*test record: results"])
+
+
+def test_unknown_record_level_is_a_usage_error(project):
+    result = project.runpytest(*cli(), "--bench-record=verbose")
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines(
+        [
+            (
+                "*unknown test record level 'verbose'; the levels are results, stimuli, debug. "
+                "Check --bench-record, or benchtare_record in the ini file.*"
+            )
+        ]
+    )
+
+
+def test_passing_asserts_are_recorded_when_pytest_reports_them(project):
+    project.makeini("[pytest]\nenable_assertion_pass_hook = true\n")
+    project.makepyfile(
+        test_setpoint="""
+        def test_setpoint_is_tracked(running, bench, signals):
+            bench.write(signals.Setpoint, 42.0)
+            value = bench.wait_until(signals.Measured, lambda v: v > 40, timeout=1.0)
+            assert value == 42.0
+        """
+    )
+    reports = reports_of(project.inline_run(*cli()), "test_setpoint_is_tracked")
+    (passed,) = [e for e in reports["call"].benchtare_record if e["kind"] == "assert"]
+    assert passed["text"] == "assert value == 42.0: passed (line 4)"
+    assert passed["assertion"] == "value == 42.0" and passed["line"] == 4
+
+
+# --- unexpected events: recorded, and warned about ------------------------------------------------
+
+MUX_CONFTEST = """
+import time
+
+import can
+import pytest
+
+CONFIG = {}
+
+
+def pytest_configure(config):
+    CONFIG["config"] = config
+
+
+def send_as_dut(data):
+    bench = CONFIG["config"].pluginmanager.get_plugin("benchtare-session").bench
+    bus = can.Bus(interface="virtual", channel=bench._backends["can0"].bus_name, ignore_config=True)
+    try:
+        bus.send(can.Message(arbitration_id=3, data=bytes(data), is_extended_id=False))
+    finally:
+        bus.shutdown()
+
+
+@pytest.fixture
+def dut_sends(bench):
+    return send_as_dut
+
+
+def pytest_runtest_logfinish(nodeid):
+    # A bad frame between tests, or after the last one.
+    if nodeid.endswith(("test_first", "test_last")):
+        send_as_dut([7, 0, 0, 0, 0, 0, 0, 0])
+        time.sleep(0.2)
+"""
+
+MISBEHAVING_DUT = """
+def test_dut_misbehaves(bench, signals, dut_sends):
+    for _ in range(3):
+        dut_sends([7, 1, 0, 0, 0, 0, 0, 0])  # multiplexer 7: the DBC only defines 0
+    dut_sends([0, 5, 0, 0, 0, 0, 0, 0])
+    assert bench.wait_until(signals.C, 5, timeout=1.0) == 5
+"""
+
+MUX_CLI = ["--dut=x.dut.yaml", "--bench=bench.yaml", "--harness=harness.yaml"]
+
+
+@pytest.fixture
+def mux_project(pytester):
+    from conftest import MUX_FILES
+
+    for name, text in MUX_FILES.items():
+        (pytester.path / name).write_text(text)
+    pytester.makeconftest(MUX_CONFTEST)
+    return pytester
+
+
+def test_bad_frames_are_recorded_and_warned_about_but_the_test_passes(mux_project):
+    mux_project.makepyfile(test_dut=MISBEHAVING_DUT)
+    result = mux_project.runpytest_subprocess(*MUX_CLI, "-rP")
+    result.assert_outcomes(passed=1, warnings=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*warnings summary*",
+            "test_dut.py::test_dut_misbehaves",
+            (
+                "*FrameMismatchWarning: the DUT sent 3 CAN frames that don't match the DBC during "
+                "call. The first: can0: the DUT sent a frame that doesn't match the DBC: "
+                "0x003 [[]8] 07 01 00 00 00 00 00 00: message MuxOut: expected multiplexer id 0, "
+                "but got 7. Every one is in the BenchTare record."
+            ),
+            "*- BenchTare record call -*",
+        ]
+    )
+    recorded = re.findall(
+        r"^\d\d:\d\d:\d\d\.\d{3} can0: the DUT sent a frame that doesn't match the DBC",
+        result.stdout.str(),
+        flags=re.MULTILINE,
+    )
+    assert len(recorded) == 3  # every frame, in the record
+
+
+def test_bad_frames_can_be_made_to_fail_the_test(mux_project):
+    mux_project.makepyfile(test_dut=MISBEHAVING_DUT)
+    result = mux_project.runpytest_subprocess(
+        *MUX_CLI, "-W", "error::benchtare.FrameMismatchWarning"
+    )
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        ["*FrameMismatchWarning: the DUT sent 3 CAN frames that don't match the DBC*"]
+    )
+
+
+def test_bad_frames_between_tests_count_against_the_next_test(mux_project):
+    mux_project.makepyfile(
+        test_dut="""
+        def test_first(bench):
+            pass
+
+        def test_second(bench):
+            pass
+        """
+    )
+    result = mux_project.runpytest_subprocess(*MUX_CLI)
+    result.assert_outcomes(passed=2, warnings=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*warnings summary*",
+            "test_dut.py::test_second",
+            (
+                "*FrameMismatchWarning: the DUT sent 1 CAN frame that doesn't match the DBC during "
+                "setup*"
+            ),
+        ]
+    )
+
+
+def test_bad_frames_after_the_last_test_are_reported(mux_project):
+    mux_project.makepyfile(test_dut="def test_last(bench):\n    pass\n")
+    result = mux_project.runpytest_subprocess(*MUX_CLI)
+    result.assert_outcomes(passed=1, warnings=1)
+    result.stdout.fnmatch_lines(
+        [
+            (
+                "*x.dut.yaml:1: FrameMismatchWarning: the DUT sent 1 CAN frame that doesn't match "
+                "the DBC after the last test*"
+            ),
+            "*- BenchTare record after the last test -*",
+            "??:??:??.??? can0: the DUT sent a frame that doesn't match the DBC: 0x003 [[]8] 07*",
+        ]
+    )
+
+
+def test_equipment_that_fails_during_a_test_is_warned_about(project):
+    project.makepyfile(
+        test_setpoint="""
+        import time
+
+        import can
+
+        def test_bus_fails(bench):
+            def broken(timeout=None):
+                raise can.CanOperationError("bus off")
+
+            bench._backends["can0"]._bus.recv = broken
+            time.sleep(0.3)
+        """
+    )
+    result = project.runpytest_subprocess(*cli(reference.HARNESS_CAN))
+    result.assert_outcomes(passed=1, warnings=1)
+    result.stdout.fnmatch_lines(
+        [
+            "test_setpoint.py::test_bus_fails",
+            "*EquipmentWarning: during call: can0 stopped receiving: CanOperationError: bus off",
+        ]
+    )
+
+
+# --- BenchTare's own log --------------------------------------------------------------------------
 
 
 def test_loading_the_files_shows_in_the_live_log(project):
@@ -354,29 +605,3 @@ def test_loading_the_files_shows_in_the_live_log(project):
             "*loaded harness file harness-io.yaml: harness reference-io*",
         ]
     )
-
-
-def test_a_project_level_for_benchtare_logs_is_kept(project):
-    project.makeconftest(
-        STAGING + "\nimport logging\nlogging.getLogger('benchtare').setLevel(logging.INFO)\n"
-    )
-    project.makepyfile(test_setpoint=FAILING_TEST)
-    result = project.runpytest_subprocess(*cli())
-    result.assert_outcomes(failed=1)
-    result.stdout.fnmatch_lines(["*Captured log setup*", "*bench laptop-sim open*"])
-    assert "write Setpoint" not in result.stdout.str()
-
-
-def test_the_benchtare_log_level_is_restored_after_the_run(project):
-    assert logging.getLogger("benchtare").level == logging.NOTSET
-    project.runpytest(*cli()).assert_outcomes(passed=2)
-    assert logging.getLogger("benchtare").level == logging.NOTSET
-
-
-def test_unconfigured_runs_leave_the_log_level_alone(pytester):
-    pytester.makepyfile(
-        "import logging\n\n"
-        "def test_level():\n"
-        "    assert logging.getLogger('benchtare').level == logging.NOTSET\n"
-    )
-    pytester.runpytest().assert_outcomes(passed=1)

@@ -3,7 +3,8 @@
 Driven channels pass each written value to whatever the simulation wired to them. Read channels
 hold a level, set by the simulation, and are sampled like a DAQ: the current level is delivered
 every ``sample_period`` seconds. A channel with no level (nothing connected, or a cut wire)
-delivers nothing. If sampling fails, the error is logged and ``check()`` reports it.
+delivers nothing. If sampling fails, the error is logged, put in the test record, and
+``check()`` reports it.
 
 Bench file:
 
@@ -25,6 +26,7 @@ from typing import Any, ClassVar
 from benchtare._yaml import YAML_VALUE_WORDS, kind_of
 from benchtare.backends.base import Binding, ChannelCaps, EquipmentKind, Receiver, WriteError
 from benchtare.errors import Problem
+from benchtare.record import EQUIPMENT_FAILURE, RecordEntry, RecordLevel
 
 log = logging.getLogger(__name__)
 
@@ -191,9 +193,18 @@ class SimIO:
         try:
             while not self._stop.wait(self.sample_period):
                 self._sample()
-        except Exception as exc:  # logged here, and check() reports it
-            self._sampler_failure = f"stopped sampling: {type(exc).__name__}: {exc}"
-            log.exception("%s %s", self.equipment, self._sampler_failure)
+        except Exception as exc:  # logged here, recorded, and check() reports it
+            failure = self._sampler_failure = f"stopped sampling: {type(exc).__name__}: {exc}"
+            log.exception("%s %s", self.equipment, failure)
+            if self._receiver is not None:
+                self._receiver.note(
+                    RecordEntry(
+                        EQUIPMENT_FAILURE,
+                        RecordLevel.RESULTS,
+                        f"{self.equipment} {failure}",
+                        {"equipment": self.equipment, "problem": failure},
+                    )
+                )
 
     def _sample(self) -> None:
         receiver = self._receiver

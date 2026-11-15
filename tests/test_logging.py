@@ -1,8 +1,8 @@
-"""Logging: what BenchTare logs, and the failures in background threads that it would otherwise
-lose (a bus that stops receiving, a frame that doesn't match the DBC, a sampler that dies)."""
+"""BenchTare's own log, for debugging BenchTare: what it logs, and the failures in background
+threads it would otherwise lose (a bus that stops receiving, a sampler that dies). What the bench
+did during a test goes into the test record instead; see test_record.py."""
 
 import logging
-import textwrap
 import threading
 import time
 
@@ -16,6 +16,8 @@ from benchtare.bench import load_bench_file
 from benchtare.bench.runtime import SIMULATION, open_bench
 from benchtare.dut.description import load_interface_description
 from benchtare.harness import load_harness_file
+
+CODEC_LOG = "benchtare.backends._can_codec"
 
 
 def open_reference(harness=reference.HARNESS_CAN):
@@ -40,66 +42,34 @@ def logs(caplog):
     return messages
 
 
-def eventually(condition, timeout=2.0):
-    """Wait for a background thread to make ``condition()`` true."""
-    deadline = time.monotonic() + timeout
-    while not condition():
-        if time.monotonic() > deadline:
-            raise AssertionError("condition not met in time")
-        time.sleep(0.01)
-
-
 def broken_recv(timeout=None):
     raise can.CanOperationError("bus off")
-
-
-def index_of(messages, start):
-    return next(i for i, m in enumerate(messages) if m.startswith(start))
 
 
 # --- what the bench logs -------------------------------------------------------------------------
 
 
-def test_bench_activity_is_logged_in_order(logs):
+def test_opening_and_closing_are_logged(logs):
     with open_reference(reference.HARNESS_CAN) as bench:
-        signals = bench.signals
-        bench.read(signals.Mode, timeout=2.0)
-        bench.write(signals.ModeRequest, "run")
-        bench.wait_until(signals.Mode, "run", timeout=2.0)
-
+        bench.read(bench.signals.Mode, timeout=2.0)
     info = logs(logging.INFO)
     assert (
         "bench laptop-sim open: equipment can0 (sim_can), io (sim); harness reference-can; "
         "DUT reference (simulated: reference)"
     ) in info
     assert info[-1] == "bench laptop-sim closed"
-
-    debug = logs(logging.DEBUG)
-    assert any(m.startswith("read Mode = 'standby' on can0 (after ") for m in debug)
-    write = index_of(debug, "write ModeRequest = 'run' on can0")
-    sent = index_of(debug, "can0: sent Command 0x100 [8] ")
-    waited = index_of(debug, "wait_until Mode = 'run' on can0 (after ")
-    assert write < sent < waited
+    assert any(m.startswith("can0: opened virtual CAN bus benchtare-can0-") for m in logs())
 
 
-def test_values_are_logged_with_their_units(logs):
-    with open_reference(reference.HARNESS_IO) as bench:
-        bench.write(bench.signals.Setpoint, 42.0)
-        bench.write(bench.signals.supply_enable, True)
-    assert "write Setpoint = 42.0 degC on io.out1" in logs(logging.DEBUG)
-    assert "write supply_enable = True on io.out3" in logs(logging.DEBUG)
-
-
-def test_timeouts_are_logged(logs):
+def test_bench_calls_go_to_the_test_record_not_the_log(logs):
     with open_reference(reference.HARNESS_CAN) as bench:
-        bench.write(bench.signals.Setpoint, 1.0)  # the DUT hasn't booted: no Measured comes
-        with pytest.raises(ReadTimeout):
-            bench.read(bench.signals.Measured, timeout=0.05)
-        with pytest.raises(ReadTimeout):
-            bench.wait_until(bench.signals.Mode, "run", timeout=0.05)
-    debug = logs(logging.DEBUG)
-    assert "read Measured on can0: nothing within 0.05 s" in debug
-    assert "wait_until Mode on can0: 'run' not reached within 0.05 s" in debug
+        bench.read(bench.signals.Mode, timeout=2.0)
+        bench.write(bench.signals.ModeRequest, "run")
+        bench.wait_until(bench.signals.Mode, "run", timeout=2.0)
+    calls = [m for m in logs() if m.startswith(("read ", "write ", "wait_until "))]
+    assert calls == []
+    # The backend still logs the frames it sends, for debugging BenchTare.
+    assert "can0: sent Command 0x100 [8] 00 00 01 00 00 00 00 00" in logs(logging.DEBUG)
 
 
 def test_a_healthy_run_logs_no_warnings_and_leaves_no_threads(logs):
@@ -165,7 +135,7 @@ def test_dbc_signals_the_dut_does_not_use_are_logged(tmp_path, logs):
 # --- a bus that stops receiving -------------------------------------------------------------------
 
 
-def test_a_bus_that_stops_receiving_is_reported(logs):
+def test_a_bus_that_stops_receiving_is_reported(logs, eventually):
     with open_reference(reference.HARNESS_CAN) as bench:
         can0 = bench._backends["can0"]
         bench.wait_until(bench.signals.Mode, "standby", timeout=2.0)
@@ -195,7 +165,7 @@ def test_a_bus_error_while_closing_is_not_a_failure(logs):
     assert logs() == []
 
 
-def test_a_simulated_dut_port_that_stops_receiving_is_reported(logs):
+def test_a_simulated_dut_port_that_stops_receiving_is_reported(logs, eventually):
     with open_reference(reference.HARNESS_CAN) as bench:
         port = bench.simulation._ports["can0"]
         bench.wait_until(bench.signals.Mode, "standby", timeout=2.0)
@@ -214,76 +184,41 @@ def test_a_simulated_dut_port_that_stops_receiving_is_reported(logs):
 
 # --- frames that don't match the DBC --------------------------------------------------------------
 
-MUX_DBC = """\
-VERSION ""
 
-NS_ :
-
-BS_:
-
-BU_: DUT BENCH
-
-BO_ 3 MuxOut: 8 DUT
- SG_ OutSel M : 0|8@1+ (1,0) [0|255] "x" BENCH
- SG_ C m0 : 8|8@1+ (1,0) [0|255] "x" BENCH
-"""
+def codec_messages(logs):
+    return [r.getMessage() for r in logs.records() if r.name == CODEC_LOG]
 
 
-@pytest.fixture
-def mux_bench(tmp_path):
-    """A bench listening for a multiplexed DUT output, with no simulated DUT: the test sends."""
-    files = {
-        "x.dbc": MUX_DBC,
-        "x.dut.yaml": "dut: x\ncan: {node: DUT, dbc: x.dbc}\n",
-        "bench.yaml": "bench: b\nequipment:\n  can0: {backend: sim_can}\n",
-        "harness.yaml": "harness: h\nconnections:\n  C: can0\n",
-    }
-    for name, text in files.items():
-        (tmp_path / name).write_text(textwrap.dedent(text))
-    with open_bench(
-        tmp_path / "x.dut.yaml", tmp_path / "bench.yaml", tmp_path / "harness.yaml"
-    ) as bench:
-        bus = can.Bus(
-            interface="virtual", channel=bench._backends["can0"].bus_name, ignore_config=True
-        )
-        try:
-            yield (
-                bench,
-                lambda data: bus.send(
-                    can.Message(arbitration_id=3, data=bytes(data), is_extended_id=False)
-                ),
-            )
-        finally:
-            bus.shutdown()
-
-
-def test_a_frame_that_does_not_match_the_dbc_is_logged_and_skipped(mux_bench, logs):
+def test_a_bad_frame_is_in_the_bench_log_at_debug(mux_bench, logs):
+    # The test record keeps every bad frame (test_record.py); BenchTare's own log notes it only
+    # for debugging.
     bench, send = mux_bench
     send([7, 1, 0, 0, 0, 0, 0, 0])  # multiplexer 7: the DBC only defines 0
     send([0, 5, 0, 0, 0, 0, 0, 0])
-    assert bench.wait_until(bench.signals.C, 5, timeout=1.0) == 5  # reception went on
-    assert bench.check()["can0"] == []
-    assert logs(logging.WARNING) == [
-        (
-            "can0: ignored a frame that doesn't match the DBC: 0x003 [8] 07 01 00 00 00 00 00 00: "
-            "message MuxOut: expected multiplexer id 0, but got 7\n"
-            "  Check: the DBC files describe what the DUT sends"
-        )
-    ]
+    assert bench.wait_until(bench.signals.C, 5, timeout=1.0) == 5
+    (record,) = [r for r in logs.records() if r.name == CODEC_LOG]
+    assert record.levelno == logging.DEBUG
+    assert record.getMessage() == (
+        "can0: ignored a frame that doesn't match the DBC: 0x003 [8] 07 01 00 00 00 00 00 00: "
+        "message MuxOut: expected multiplexer id 0, but got 7\n"
+        "  Check: the DBC files describe what the DUT sends"
+    )
 
 
-def test_repeated_bad_frames_are_counted_not_logged_each_time(mux_bench, logs, monkeypatch):
+def test_repeated_bad_frames_are_counted_not_logged_each_time(
+    mux_bench, logs, monkeypatch, eventually
+):
     monkeypatch.setattr(FrameReceiver, "quiet_period", 0.3)
     bench, send = mux_bench
     for _ in range(3):
         send([7, 0, 0, 0, 0, 0, 0, 0])
     send([0, 1, 0, 0, 0, 0, 0, 0])
     bench.wait_until(bench.signals.C, 1, timeout=1.0)  # all four frames have been received
-    assert len(logs(logging.WARNING)) == 1
+    assert len(codec_messages(logs)) == 1
     time.sleep(0.35)
     send([7, 0, 0, 0, 0, 0, 0, 0])
-    eventually(lambda: len(logs(logging.WARNING)) == 2)
-    assert logs(logging.WARNING)[1].endswith("(2 more like it since the last report)")
+    eventually(lambda: len(codec_messages(logs)) == 2)
+    assert codec_messages(logs)[1].endswith("(2 more like it since the last report)")
 
 
 def test_an_error_handling_a_frame_is_logged_with_its_traceback(mux_bench, logs, monkeypatch):
@@ -309,12 +244,9 @@ def test_an_error_handling_a_frame_is_logged_with_its_traceback(mux_bench, logs,
     assert bench.check()["can0"] == []
 
 
-def test_decoding_a_frame_that_does_not_match_raises_frame_error():
-    import cantools
-
-    message = cantools.database.load_string(MUX_DBC, "dbc").get_message_by_name("MuxOut")
+def test_decoding_a_frame_that_does_not_match_raises_frame_error(mux_message):
     with pytest.raises(FrameError, match="message MuxOut: expected multiplexer id 0, but got 9"):
-        CanCodec().decode(message, bytes([9, 0, 0, 0, 0, 0, 0, 0]))
+        CanCodec().decode(mux_message, bytes([9, 0, 0, 0, 0, 0, 0, 0]))
 
 
 @pytest.mark.parametrize(
@@ -338,7 +270,7 @@ def test_frames_are_shown_as_on_a_bus_trace(frame, shown):
 # --- other background threads ---------------------------------------------------------------------
 
 
-def test_a_sampler_that_stops_is_reported(logs, monkeypatch):
+def test_a_sampler_that_stops_is_reported(logs, monkeypatch, eventually):
     with open_reference(reference.HARNESS_IO) as bench:
         bench.wait_until(bench.signals.Mode, "standby", timeout=2.0)
 
@@ -356,7 +288,7 @@ def test_a_sampler_that_stops_is_reported(logs, monkeypatch):
     assert error.exc_info is not None
 
 
-def test_a_failing_reference_dut_action_is_logged(logs, monkeypatch):
+def test_a_failing_reference_dut_action_is_logged(logs, monkeypatch, eventually):
     with open_reference(reference.HARNESS_IO) as bench:
         bench.wait_until(bench.signals.Mode, "standby", timeout=2.0)
         device = bench.simulation.device

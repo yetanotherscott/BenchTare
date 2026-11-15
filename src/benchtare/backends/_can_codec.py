@@ -115,19 +115,31 @@ def describe_frame(received: can.Message) -> str:
     return f"0x{received.arbitration_id:0{width}x}{kind} [{len(received.data)}] {data}".rstrip()
 
 
+def frame_facts(received: can.Message) -> dict[str, Any]:
+    """A frame as plain values, for the test record."""
+    return {
+        "frame_id": received.arbitration_id,
+        "extended": bool(received.is_extended_id),
+        "data": bytes(received.data).hex(" "),
+    }
+
+
 class FrameReceiver:
     """Receives frames from a bus on a thread of its own and hands each one to ``handle``.
 
     python-can's Notifier stops receiving for good if a handler raises, which would leave every
     later read timing out with nothing said. Here:
 
-    - A frame that doesn't match the DBC (``FrameError``) is logged as a warning and skipped.
+    - A frame that doesn't match the DBC (``FrameError``) is logged at ``bad_frame_level`` and
+      skipped. On the bench side the handler has already put it in the test record, so the
+      log needs it only for debugging.
     - Any other error while handling a frame is logged with its traceback, and skipped.
-    - If the bus itself fails, reception stops, the failure is logged, and ``failure`` says
-      what happened, so the backend's ``check()`` can report it.
+    - If the bus itself fails, reception stops, the failure is logged, ``failure`` says what
+      happened (so the backend's ``check()`` can report it), and ``on_failure`` is called.
 
-    Each kind of bad frame is logged at most once per ``quiet_period`` seconds, with a count of
-    the ones in between, so a DUT sending a bad frame every 10 ms doesn't flood the log.
+    In BenchTare's log, each kind of bad frame appears at most once per ``quiet_period``
+    seconds, with a count of the ones in between, so a DUT sending a bad frame every 10 ms
+    doesn't flood it. The test record keeps every one.
     """
 
     quiet_period = 1.0
@@ -138,10 +150,14 @@ class FrameReceiver:
         handle: Callable[[can.Message], None],
         *,
         who: str,
+        bad_frame_level: int = logging.WARNING,
+        on_failure: Callable[[str], None] | None = None,
         poll: float = 0.05,
     ) -> None:
         self.who = who
         self.failure: str | None = None
+        self._bad_frame_level = bad_frame_level
+        self._on_failure = on_failure
         self._bus = bus
         self._handle = handle
         self._poll = poll
@@ -166,6 +182,8 @@ class FrameReceiver:
                 if not self._stop.is_set():  # an error while closing isn't a failure
                     self.failure = f"stopped receiving: {type(exc).__name__}: {exc}"
                     log.error("%s %s", self.who, self.failure)
+                    if self._on_failure is not None:
+                        self._on_failure(self.failure)
                 return
             if received is None:
                 continue
@@ -174,7 +192,7 @@ class FrameReceiver:
             except FrameError as exc:
                 self._log_bad_frame(
                     received,
-                    logging.WARNING,
+                    self._bad_frame_level,
                     f"{self.who}: ignored a frame that doesn't match the DBC: "
                     f"{describe_frame(received)}: {exc}\n"
                     "  Check: the DBC files describe what the DUT sends",
