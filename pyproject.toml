@@ -35,10 +35,8 @@ dev = ["pytest>=7.4", "ruff"]
 [project.entry-points.pytest11]
 benchtare = "benchtare.plugin"
 
-# Add this when the module exists (the console script, in M4):
-#
-# [project.scripts]
-# benchtare = "benchtare.cli:main"
+[project.scripts]
+benchtare = "benchtare.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/benchtare"]

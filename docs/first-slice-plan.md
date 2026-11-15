@@ -232,21 +232,31 @@ Each milestone ends with passing tests and a commit. Do them in order.
   between tests and after the last; `-W error` makes them fail; a failed test
   shows its record; a failed bus, DUT port and sampler are each caught; a
   healthy run logs no warnings and leaves no threads.
+- Deferred: the bench checks frames against the DBC only for messages that
+  carry a connected signal. Checking every message the DUT sends, connected or
+  not, is a possible later step.
 
-### M4: Self-test
+### M4: Self-test (done)
 
-- Run the bench check and the harness check (loopbacks and presence) at
-  session start. If either fails, stop with `pytest.exit` and a message that
-  says what failed and what to check. No tests run.
-- `benchtare selftest` runs the self-test alone. Register the `benchtare`
-  console script. Outside pytest, the CLI sets up logging itself: warnings and
-  errors by default, more with `-v`.
-- Tests:
-  - a healthy reference setup passes;
-  - a failed equipment item, a cut loopback wire and a missing DUT are each
-    caught;
-  - no tests run after a self-test failure;
-  - the CLI exit codes are right.
+- `selftest/checks.py`: the bench check (each equipment item's `check()`, and
+  the simulated DUT) and the harness check (each loopback reads back `True`
+  then `False` within 1 s; each presence check sees bus traffic or a value of
+  its signal within `within:`). Checks on failed equipment are skipped.
+- The plugin runs it after collection, before the first test, when any
+  collected test uses `bench`. A failure lists every check and stops the run
+  with `pytest.exit` (exit code 2). No tests run.
+- `benchtare selftest` runs `pytest --selftest-only`, so it reads the same
+  options and ini file as a test run, and pytest's own log options apply. Exit
+  codes: 0 passed, 1 failed, 4 couldn't start. The `benchtare` console script
+  is registered, and `python -m benchtare` works too.
+- The bench gained channel-level access for loopback ends (`drive_channel`,
+  `wait_channel`), `seen` for presence checks, and bus backends a
+  `wait_for_traffic` method (`BusBackend`).
+- Tests: the healthy reference passes on both harnesses; failed equipment, a
+  failed bus, a cut loopback, a stuck loopback, a DUT unplugged from the bus, a
+  DUT that never boots, a stopped simulation and a bench that won't open are
+  each caught; no tests run after a failure; the self-test doesn't run when no
+  test uses the bench or when only collecting; the CLI exit codes are right.
 
 ### M5: Results and manifest
 

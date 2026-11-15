@@ -113,6 +113,15 @@ class Backend(Protocol):
         ...
 
 
+@runtime_checkable
+class BusBackend(Backend, Protocol):
+    """A backend for a bus (``kind = "bus"``), which can also tell whether anything is on it."""
+
+    def wait_for_traffic(self, timeout: float) -> bool:
+        """Whether any frame has been received since the bus opened, waiting up to ``timeout``."""
+        ...
+
+
 class BackendType(Protocol):
     """The class of a backend, as named by ``backend:`` in a bench file."""
 
@@ -215,6 +224,13 @@ class ReceiveBuffer:
                 if remaining <= 0:
                     return None
                 self._changed.wait(remaining)
+
+    def wait_seen(self, key: str, timeout: float) -> Received | None:
+        """The most recent value of ``key`` received since the bench opened, waiting up to
+        ``timeout`` for the first one. The self-test's presence check uses it."""
+        with self._changed:
+            self._changed.wait_for(lambda: key in self._last, timeout)
+            return self._last.get(key)
 
     def last(self, key: str) -> Received | None:
         """The most recent value of ``key`` ever received, for error messages."""

@@ -433,15 +433,50 @@ BenchTare checks three things: the bench, the harness and the tests.
 
 ### The self-test (before every session)
 
-The self-test runs before any test. If it fails, the session stops, no tests
-run, and the message says what failed and what to check.
+The self-test runs once the tests are collected, before the first one. If it
+fails, the session stops, no tests run, and the output says what failed and
+what to check. This catches a disconnected cable, a missing DUT, or a DUT that
+never booted, before those turn into confusing test failures.
 
-- **Bench check.** Each equipment item opens and reports itself healthy.
-- **Harness check.** Each loopback reads back what was driven, and each presence
-  check passes. This catches a disconnected cable, a missing DUT, or a DUT that
-  never booted, before those turn into confusing test failures.
+| Check | Passes when |
+| --- | --- |
+| Bench: each equipment item | It opened, and reports itself healthy |
+| Bench: the simulated DUT, if any | It is running, and none of its own actions failed |
+| Harness: each loopback | Driving `True`, then `False`, each reads back within 1 s. A cut wire and a line stuck at either level both fail |
+| Harness: each presence check on a bus | Any frame arrives on the bus within its `within:` seconds |
+| Harness: each presence check on a signal | Any value of the signal arrives within its `within:` seconds |
 
-`benchtare selftest` runs the self-test on its own.
+A harness check on equipment that failed the bench check is skipped, because it
+couldn't tell anything new.
+
+- **Only when the bench is needed.** The self-test runs, and the bench opens,
+  only if a collected test uses the `bench` fixture. Tests that only use
+  `signals` can still run without the equipment. `--collect-only` runs neither.
+- **What it shows.** A passing self-test shows one line before the first test;
+  `-v` lists every check. A failing one lists every check, with what to check
+  for each failure, and the run stops with exit code 2 (pytest's "interrupted"):
+
+```
+=================== BenchTare self-test failed in 1.01 s ===================
+PASSED  equipment can0: sim_can, healthy
+PASSED  equipment io: sim, healthy
+PASSED  simulated DUT reference: running
+FAILED  loopback io.out4 -> io.in4: drove True on io.out4, but io.in4 didn't read it back within 1 s; it read nothing
+        Check: the loopback wire from io.out4 to io.in4 (harness file harness-can.yaml)
+PASSED  DUT traffic on can0: frames received
+PASSED  DUT sends Mode: Mode = 'standby' on can0
+```
+
+- **Unexpected events during the self-test**, such as a frame that doesn't
+  match the DBC, are warned about like those during a test, but don't fail it:
+  the self-test checks the bench and harness, not the DUT's behaviour.
+
+**`benchtare selftest`** runs the self-test on its own, without running any
+test. It runs through pytest (`pytest --selftest-only`), so it finds the three
+files exactly as a test run does: from `--dut`, `--bench` and `--harness`, or
+from the ini file. Other options go to pytest. It lists every check, and exits
+0 when the self-test passed, 1 when it failed, and 4 when it couldn't start
+(BenchTare isn't configured, or a file is wrong).
 
 ### The test check (on demand)
 

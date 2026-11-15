@@ -22,6 +22,7 @@ Bench file:
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar
@@ -102,9 +103,11 @@ class SimCan:
         self._receiver: Receiver | None = None
         self._rx: dict[tuple[int, bool], list[tuple[Any, Binding]]] = {}
         self._failure: str | None = None
+        self._traffic = threading.Event()  # set by the first frame received
 
     def open(self, bindings: Sequence[Binding], receiver: Receiver) -> None:
         self._receiver = receiver
+        self._traffic.clear()
         for binding in bindings:
             if binding.drive or binding.can is None:
                 continue
@@ -184,10 +187,18 @@ class SimCan:
         self._failure = reason
         log.info("%s: simulated failure: %s", self.equipment, reason)
 
+    def wait_for_traffic(self, timeout: float) -> bool:
+        if self._failure is not None:
+            return False
+        return self._traffic.wait(timeout)
+
     def _on_frame(self, received: can.Message) -> None:
+        if self._failure is not None:
+            return
+        self._traffic.set()
         listening = self._rx.get(frame_key(received))
         receiver = self._receiver
-        if not listening or receiver is None or self._failure is not None:
+        if not listening or receiver is None:
             return
         if receiver.wants(RecordLevel.DEBUG):
             self._note(

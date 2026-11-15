@@ -17,8 +17,12 @@ Command-line paths are relative to where pytest is run, and ini paths to the ini
   project's test run.
 - **All three set.** The files are loaded and checked when the test session starts. A wrong
   file stops the run with the file's problems before any test runs.
-- **Opening the bench.** That happens the first time a test asks for ``bench``, so tests that
-  don't need it can run without the equipment.
+- **The self-test.** Once tests are collected, if any of them uses ``bench``, the bench is
+  opened and the self-test runs (``benchtare.selftest``). If it fails, the run stops before
+  the first test, with what failed and what to check. If no test uses the bench, neither
+  happens, so tests that don't need the equipment can run without it.
+- **Self-test only.** ``--selftest-only`` (what ``benchtare selftest`` runs) runs the self-test
+  and no tests, and exits 0 if it passed and 1 if it failed.
 
 Two records, each with its own verbosity:
 
@@ -60,6 +64,7 @@ from benchtare.record import (
     RecordLevel,
     render,
 )
+from benchtare.selftest import SelfTestResult, could_not_open, run_selftest
 from benchtare.signals.model import SignalSet
 
 SETTINGS = {
@@ -110,6 +115,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "benchtare_record",
         f"BenchTare: test record level ({', '.join(LEVEL_NAMES)}); default {DEFAULT_LEVEL.label}",
     )
+    group.addoption(
+        "--selftest-only",
+        dest="benchtare_selftest_only",
+        action="store_true",
+        default=False,
+        help="run BenchTare's self-test of the bench and harness, then stop without running "
+        "any test (this is what 'benchtare selftest' does)",
+    )
 
 
 def configured_paths(config: pytest.Config) -> dict[str, Path] | None:
@@ -153,6 +166,11 @@ def configured_level(config: pytest.Config) -> RecordLevel:
 def pytest_configure(config: pytest.Config) -> None:
     paths = configured_paths(config)
     if paths is None:
+        if config.getoption("benchtare_selftest_only"):
+            raise pytest.UsageError(
+                "There's nothing to self-test: BenchTare isn't configured.\n"
+                + NOT_CONFIGURED.split("\n", 1)[1]
+            )
         return
     config.stash[_PATHS] = paths
     config.stash[_LEVEL] = configured_level(config)
@@ -170,8 +188,10 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     except ConfigError as exc:
         raise pytest.UsageError(f"BenchTare can't start.\n{exc}") from None
     level = session.config.stash[_LEVEL]
+    selftest_only = bool(session.config.getoption("benchtare_selftest_only"))
     session.config.pluginmanager.register(
-        BenchSession(description, bench_config, harness, level), SESSION_PLUGIN
+        BenchSession(description, bench_config, harness, level, selftest_only=selftest_only),
+        SESSION_PLUGIN,
     )
 
 
@@ -210,12 +230,17 @@ class BenchSession:
         bench: BenchConfig,
         harness: HarnessConfig,
         level: RecordLevel = DEFAULT_LEVEL,
+        *,
+        selftest_only: bool = False,
     ) -> None:
         self.description = description
         self.bench_config = bench
         self.harness = harness
         self.level = level
+        self.selftest_only = selftest_only
         self.bench: Bench | None = None
+        self.selftest: SelfTestResult | None = None  # kept for the results (M5)
+        self.selftest_record: list[RecordEntry] = []
         self._open_error: str | None = None
         # Entries arrive from receive threads as well as from the test, so all of this is
         # guarded by the lock.
@@ -223,29 +248,62 @@ class BenchSession:
         self._item: pytest.Item | None = None
         self._phase: str | None = None
         self._pending: list[RecordEntry] = []  # arrived between phases: they go to the next one
+        self._in_selftest = False  # entries then go to the self-test's record
         self._after_last_test: list[RecordEntry] = []
 
     def open_bench(self) -> Bench:
+        """The open bench, for the ``bench`` fixture. Fails the test if it can't be opened."""
         if self._open_error is not None:
             pytest.fail(self._open_error, pytrace=False)
+        try:
+            return self._open()
+        except BenchTareError as exc:
+            self._open_error = f"BenchTare couldn't open the bench.\n{exc}"
+            pytest.fail(self._open_error, pytrace=False)
+
+    def _open(self) -> Bench:
         if self.bench is None:
             bench = Bench(self.description, self.bench_config, self.harness)
             bench.record_level = self.level
             bench.recorder = self._record
-            try:
-                bench.open()
-            except BenchTareError as exc:
-                self._open_error = f"BenchTare couldn't open the bench.\n{exc}"
-                pytest.fail(self._open_error, pytrace=False)
+            bench.open()
             self.bench = bench
         return self.bench
 
     def _record(self, entry: RecordEntry) -> None:
         with self._lock:
-            if self._item is not None and self._phase is not None:
+            if self._in_selftest:
+                self.selftest_record.append(entry)
+            elif self._item is not None and self._phase is not None:
                 _phase_record(self._item, self._phase).append(entry)
             else:
                 self._pending.append(entry)
+
+    def run_selftest(self, config: pytest.Config) -> SelfTestResult:
+        """Open the bench and run the self-test, and show the result."""
+        with self._lock:
+            self._in_selftest = True
+        try:
+            try:
+                bench = self._open()
+            except BenchTareError as exc:
+                result = could_not_open(exc)
+            else:
+                result = run_selftest(bench)
+        finally:
+            with self._lock:
+                self._in_selftest = False
+        self.selftest = result
+        _show_selftest(config, result, self.selftest_record)
+        unexpected = [entry for entry in self.selftest_record if entry.unexpected]
+        _warn_unexpected(self._warn_at_description, "during the self-test", unexpected)
+        return result
+
+    def _warn_at_description(self, warning: Warning) -> None:
+        # No test to point at: point at the interface description the DUT is described by.
+        warnings.warn_explicit(
+            warning, type(warning), filename=str(self.description.path), lineno=1
+        )
 
     # --- hooks ----------------------------------------------------------------------------
 
@@ -262,6 +320,31 @@ class BenchSession:
             f"harness {h.name} ({shown(h.path)}); test record: {self.level.label}"
         )
         return [line]
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_collection(self, session: pytest.Session) -> bool | None:
+        if self.selftest_only:
+            session.items = []
+            return True  # collect nothing: only the self-test runs
+        return None
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtestloop(self, session: pytest.Session) -> bool | None:
+        config = session.config
+        if self.selftest_only:
+            self.run_selftest(config)
+            return True
+        if config.option.collectonly or session.testsfailed or not session.items:
+            return None  # pytest reports these itself
+        if not any("bench" in getattr(item, "fixturenames", ()) for item in session.items):
+            _write(config, "benchtare self-test: not run, because no test uses the bench")
+            return None
+        if not self.run_selftest(config).passed:
+            pytest.exit(
+                "BenchTare's self-test failed, so no tests ran. What failed is listed above.",
+                returncode=pytest.ExitCode.INTERRUPTED,
+            )
+        return None
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_protocol(self, item: pytest.Item) -> Generator[None, Any, None]:
@@ -335,26 +418,55 @@ class BenchSession:
             if any(entry.kind != RESULT for entry in entries):
                 report.sections.append((f"BenchTare record {phase}", render(entries)))
 
-    def pytest_sessionfinish(self) -> None:
+    def pytest_sessionfinish(self, session: pytest.Session) -> None:
         if self.bench is not None:
             self.bench.close()
             self.bench = None
         with self._lock:
             self._after_last_test = [entry for entry in self._pending if entry.unexpected]
             self._pending.clear()
-
-        def warn(warning: Warning) -> None:
-            # No test to point at: point at the interface description the frames don't match.
-            warnings.warn_explicit(
-                warning, type(warning), filename=str(self.description.path), lineno=1
-            )
-
-        _warn_unexpected(warn, "after the last test", self._after_last_test)
+        _warn_unexpected(self._warn_at_description, "after the last test", self._after_last_test)
+        if self.selftest_only and self.selftest is not None:
+            # No tests were collected, which pytest would report as exit code 5.
+            ok = self.selftest.passed
+            session.exitstatus = pytest.ExitCode.OK if ok else pytest.ExitCode.TESTS_FAILED
 
     def pytest_terminal_summary(self, terminalreporter: Any) -> None:
         if self._after_last_test:
             terminalreporter.write_sep("-", "BenchTare record after the last test")
             terminalreporter.write_line(render(self._after_last_test))
+
+
+def _write(config: pytest.Config, line: str, **markup: bool) -> None:
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(line, **markup)
+
+
+def _show_selftest(
+    config: pytest.Config, result: SelfTestResult, record: Sequence[RecordEntry]
+) -> None:
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:
+        return
+    verbose = config.getoption("verbose") > 0
+    took = f"in {result.duration:.2f} s"
+    if result.passed:
+        if verbose or config.getoption("benchtare_selftest_only"):
+            reporter.write_sep("=", f"BenchTare self-test passed {took}", green=True)
+            for line in result.lines():
+                reporter.write_line(line)
+        else:
+            reporter.write_line(
+                f"benchtare self-test passed: {result.summary()} {took}", green=True
+            )
+        return
+    reporter.write_sep("=", f"BenchTare self-test failed {took}", red=True)
+    for line in result.lines():
+        reporter.write_line(line, red=line.startswith(("FAILED", "        Check:")))
+    if record:
+        reporter.write_sep("-", "BenchTare record self-test")
+        reporter.write_line(render(record))
 
 
 def _phase_record(item: pytest.Item, phase: str) -> list[RecordEntry]:

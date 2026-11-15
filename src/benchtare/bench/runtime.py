@@ -33,6 +33,7 @@ from benchtare.backends.base import (
     Binding,
     ReadTimeout,
     ReceiveBuffer,
+    Received,
     WriteError,
 )
 from benchtare.bench.config import BenchConfig, load_bench_file
@@ -292,7 +293,55 @@ class Bench:
         )
         return item.value
 
+    # --- for the self-test ------------------------------------------------------------------
+
+    def backend(self, equipment: str) -> Backend:
+        """The backend that drives an equipment item."""
+        return self._backends[equipment]
+
+    def drive_channel(self, endpoint: str, value: Any) -> None:
+        """Drive a bench channel that carries no signal, such as a loopback's drive end."""
+        binding = self._channel(endpoint, drive=True)
+        self._note(
+            RecordEntry(
+                WRITE,
+                RecordLevel.STIMULI,
+                f"write {endpoint} = {value!r}",
+                _facts(binding, value),
+            )
+        )
+        with self._buffer.writing():
+            self._backends[binding.equipment].write(binding, value)
+
+    def wait_channel(self, endpoint: str, expected: Any, timeout: float) -> Received | None:
+        """Wait for ``expected`` on a bench channel that carries no signal, such as a loopback's
+        read end, received after the most recent write. None if it doesn't come in time."""
+        binding = self._channel(endpoint, drive=False)
+        _check_timeout(timeout)
+        return self._buffer.wait_for_match(binding.key, lambda value: value == expected, timeout)
+
+    def seen(self, signal: Signal | str, timeout: float) -> Received | None:
+        """The latest value of a DUT output received since the bench opened, waiting up to
+        ``timeout`` for the first. None if none comes."""
+        binding = self._readable(signal)
+        _check_timeout(timeout)
+        return self._buffer.wait_seen(binding.key, timeout)
+
+    def last_received(self, key: str) -> Received | None:
+        """The latest value received on a signal or channel since the bench opened."""
+        return self._buffer.last(key)
+
     # --- helpers ----------------------------------------------------------------------------
+
+    def _channel(self, endpoint: str, *, drive: bool) -> Binding:
+        binding = self._bindings.get(endpoint)
+        if binding is None or binding.signal is not None or binding.drive is not drive:
+            raise BenchError(
+                f"{endpoint} isn't a {'driven' if drive else 'read'} loopback end in harness file "
+                f"{self.harness.path.name}",
+                hint="the loopbacks: list in the harness file",
+            )
+        return binding
 
     def _binding(self, signal: Signal | str) -> Binding:
         __tracebackhide__ = True

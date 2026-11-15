@@ -101,6 +101,7 @@ Use these names consistently in code, docs and messages.
 pip install -e ".[dev]"    # install for development
 pytest                     # run the test suite
 ruff check . && ruff format --check .
+benchtare selftest --dut … --bench … --harness …   # the self-test alone
 ```
 
 ## Decisions already made
