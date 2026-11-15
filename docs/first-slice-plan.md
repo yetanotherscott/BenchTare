@@ -335,6 +335,10 @@ Do not build these yet, even where the design brief describes them:
 - ReqIF, StrictDoc or Sphinx-Needs importers.
 - Write-back to any requirements tool.
 - Trend analysis and dashboards.
+- A GUI (design brief, later stage 10).
+- IDE setup for test development, such as editor schemas for the YAML files or
+  run configurations (design brief, later stage 9). `benchtare init` (M7)
+  writes the quickstart project only.
 - Closed-loop or real-time simulation.
 
 ## Before the first release

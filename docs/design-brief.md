@@ -164,6 +164,12 @@ proposal.
 | 6 | Analysis | Remote database option; trends for pass rate, duration and measured values |
 | 7 | Protocols | CANopen and Modbus, each with a CI reference; J1939 and ISOBUS considered after that |
 | 8 | Community | Backend and adapter guides; write-back adapters from contributors |
+| 9 | Test development in IDEs | Setup for writing and debugging tests in common IDEs, such as VS Code and PyCharm: schemas so the editor completes and checks interface descriptions, bench files and harness files; completion of signal names in tests; run and debug configurations; `benchtare init` writing them for a new project |
+| 10 | GUI | A graphical front end for people who don't live in a terminal, for example to run the self-test and tests, follow a run, and browse results and test records. It drives pytest and reads the results database; it doesn't replace either. Scope to be decided |
+
+Stages 9 and 10 are on the horizon rather than planned in detail. Neither is
+needed for the first slice, but the first slice shouldn't make them harder: the
+file formats, the CLI and the results schema are what they will build on.
 
 ## Prior art
 
@@ -225,3 +231,5 @@ not from hands-on evaluation.
 - [ ] Which transport plugin ships second, after virtual CAN?
 - [ ] Is a hardware reference bench needed later?
 - [ ] Which local database is the default? (SQLite is assumed in the first-slice plan.)
+- [ ] Which IDEs get a ready-made setup first?
+- [ ] What should the GUI cover first, and should it be a desktop app or a local web page?
