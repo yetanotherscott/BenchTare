@@ -23,7 +23,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from benchtare._yaml import read_mapping
+from benchtare._yaml import YAML_VALUE_WORDS, kind_of, read_mapping
 from benchtare.backends import BACKENDS
 from benchtare.backends.base import ChannelCaps, EquipmentKind
 from benchtare.errors import ConfigError, Problem
@@ -88,7 +88,16 @@ def load_bench_file(path: str | os.PathLike[str]) -> BenchConfig:
         )
     else:
         for item_id, spec in raw_equipment.items():
-            item = _load_equipment(str(item_id), spec, problems)
+            if not isinstance(item_id, str):
+                problems.append(
+                    Problem(
+                        f"an equipment name was read as {kind_of(item_id)}, not as a name",
+                        where="equipment:",
+                        hint=f"quote it, for example 'on': {{backend: sim}}; {YAML_VALUE_WORDS}",
+                    )
+                )
+                continue
+            item = _load_equipment(item_id, spec, problems)
             if item is not None:
                 equipment[item.id] = item
 
@@ -117,6 +126,14 @@ def _load_equipment(item_id: str, spec: Any, problems: list[Problem]) -> Equipme
         known = ", ".join(sorted(BACKENDS))
         if backend_name is None:
             problems.append(Problem("has no 'backend:'", where=where, hint=f"backends: {known}"))
+        elif not isinstance(backend_name, str):
+            problems.append(
+                Problem(
+                    f"'backend:' must name a backend, not {kind_of(backend_name)}",
+                    where=where,
+                    hint=f"backends: {known}",
+                )
+            )
         else:
             close = difflib.get_close_matches(str(backend_name), list(BACKENDS), n=1)
             problems.append(

@@ -31,7 +31,8 @@ class Problem:
                 subject += f" ({self.where})"
             subject += ": "
         elif self.where:
-            subject = f"{self.where}: "
+            # "signals:" is already followed by its colon; don't print "signals::".
+            subject = self.where + (" " if self.where.endswith(":") else ": ")
         text = subject + self.message
         if self.hint:
             text += f"\n      Check: {self.hint}"

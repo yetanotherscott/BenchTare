@@ -182,6 +182,26 @@ With real hardware the harness is a physical thing and the file describes it.
 With a simulated bench, the simulation builds its wiring from the harness file
 and plugs in the simulated DUT named by `simulate:`.
 
+## When a file is wrong
+
+The interface description, the bench file and the harness file are all checked
+when they load. Every problem in a file is reported together, with the file,
+the signal or entry, and what to check. A wrong file never produces a traceback,
+and it is never silently accepted. Some of the checks go beyond plain YAML:
+
+- **A key given twice in the same section** is an error, with both line
+  numbers. Plain YAML would silently keep the second one, so one copy-paste
+  slip could rewire a signal. `<<: *anchor` merges may still be overridden.
+- **A file that isn't UTF-8 text** is reported with the line of the first bad
+  byte.
+- **The wrong kind of file** is named. For example, a harness file given as the
+  bench file, or a DBC file given where a YAML file belongs.
+- **Values YAML reads unexpectedly are explained.** Unquoted `on`, `off`, `yes`,
+  `no`, `true`, `false` and `null` become values, not names. The error says to
+  quote them.
+- **Near misses get a suggestion**, such as `Float` for `float`, `in` for
+  `input`, or `can1` when the bench has `can0`.
+
 ## Staging
 
 Most tests need the DUT in a particular state first. Staging is done with

@@ -21,6 +21,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar
 
+from benchtare._yaml import YAML_VALUE_WORDS, kind_of
 from benchtare.backends.base import Binding, ChannelCaps, EquipmentKind, Receiver, WriteError
 from benchtare.errors import Problem
 
@@ -66,7 +67,16 @@ class SimIO:
             return {}
         channels: dict[str, ChannelCaps] = {}
         for channel, caps in raw.items():
-            channel = str(channel)
+            if channel is None or isinstance(channel, bool):
+                problems.append(
+                    Problem(
+                        f"a channel name was read as {kind_of(channel)}, not as a name",
+                        where=where,
+                        hint=f"quote it, for example 'on': {{read: true}}; {YAML_VALUE_WORDS}",
+                    )
+                )
+                continue
+            channel = str(channel)  # numbered channels such as 0: are fine
             if not _valid_name(channel):
                 problems.append(
                     Problem(

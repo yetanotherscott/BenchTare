@@ -472,3 +472,51 @@ def test_error_message_names_file_signal_and_what_to_check(write):
     assert str(path) in text
     assert "signal 'v'" in text
     assert "Check:" in text
+
+
+# --- malformed DBC references -------------------------------------------------------------------
+
+
+def test_dbc_path_that_is_a_directory(write, tmp_path):
+    (tmp_path / "folder.dbc").mkdir()
+    path = write("dut.yaml", "dut: x\ncan: {node: REFDEV, dbc: folder.dbc}\n")
+    with pytest.raises(ConfigError, match="can't read DBC file 'folder.dbc': Is a directory"):
+        load_interface_description(path)
+
+
+def test_dbc_listed_twice_is_one_problem(write):
+    write("ref.dbc", DBC)
+    path = write("dut.yaml", "dut: x\ncan: {node: REFDEV, dbc: [ref.dbc, ./ref.dbc]}\n")
+    with pytest.raises(ConfigError) as info:
+        load_interface_description(path)
+    (problem,) = problems_of(info)
+    assert "DBC file './ref.dbc' is listed more than once (also as 'ref.dbc')" in problem
+
+
+def test_dbc_the_dut_node_does_not_use(write):
+    # LONELY is a node in the DBC but neither sends nor receives anything, so nothing imports.
+    write(
+        "lonely.dbc",
+        'VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: REFDEV LONELY\n\n'
+        'BO_ 1 M: 1 REFDEV\n SG_ S : 0|8@1+ (1,0) [0|255] "x" REFDEV\n',
+    )
+    path = write("dut.yaml", "dut: x\ncan: {node: LONELY, dbc: lonely.dbc}\n")
+    with pytest.raises(ConfigError) as info:
+        load_interface_description(path)
+    (problem,) = problems_of(info)
+    assert "imports no signals: node 'LONELY' neither sends nor receives any message" in problem
+
+
+def test_dbc_empty_list(write):
+    path = write("dut.yaml", "dut: x\ncan: {node: REFDEV, dbc: []}\n")
+    with pytest.raises(ConfigError, match="'can: dbc:' is an empty list"):
+        load_interface_description(path)
+
+
+def test_node_that_is_not_text(write):
+    write("ref.dbc", DBC)
+    path = write("dut.yaml", "dut: x\ncan: {node: [REFDEV], dbc: ref.dbc}\n")
+    with pytest.raises(ConfigError) as info:
+        load_interface_description(path)
+    (problem,) = problems_of(info)  # not also "has no 'node:' entry"
+    assert "must be the DUT's node name in the DBC, not a list" in problem

@@ -28,7 +28,7 @@ from typing import Any
 
 import cantools
 
-from benchtare._yaml import read_mapping
+from benchtare._yaml import YAML_VALUE_WORDS, kind_of, read_mapping
 from benchtare.errors import ConfigError, Problem
 from benchtare.signals.model import (
     NUMERIC_TYPES,
@@ -101,7 +101,7 @@ def load_interface_description(path: str | os.PathLike[str]) -> InterfaceDescrip
     data = read_mapping(path, kind=KIND)
     problems: list[Problem] = []
 
-    _check_keys(data, _TOP_KEYS, "the top level", problems)
+    _check_keys(data, _TOP_KEYS, "at the top level", problems)
 
     name = data.get("dut")
     if not isinstance(name, str) or not name.strip():
@@ -148,7 +148,7 @@ def _check_keys(
         if key not in allowed:
             close = difflib.get_close_matches(str(key), allowed, n=1)
             hint = f"did you mean '{close[0]}'?" if close else f"allowed keys: {', '.join(allowed)}"
-            problems.append(Problem(f"unknown key '{key}' in {where}", hint=hint))
+            problems.append(Problem(f"unknown key '{key}' {where}", hint=hint))
 
 
 def _check_standards(standards: Any, problems: list[Problem]) -> None:
@@ -158,6 +158,14 @@ def _check_standards(standards: Any, problems: list[Problem]) -> None:
         problems.append(Problem("'standards:' must be a list, for example  standards: []"))
         return
     for standard in standards:
+        if not isinstance(standard, str):
+            problems.append(
+                Problem(
+                    f"each entry must name a standard, not {kind_of(standard)}",
+                    where="standards",
+                )
+            )
+            continue
         problems.append(
             Problem(
                 f"standard '{standard}' is not available in this version of BenchTare",
@@ -183,9 +191,18 @@ def _load_can(
     if not isinstance(section, dict):
         problems.append(Problem("'can:' must contain 'node:' and 'dbc:' entries"))
         return None, ()
-    _check_keys(section, _CAN_KEYS, "'can:'", problems)
+    _check_keys(section, _CAN_KEYS, "in 'can:'", problems)
 
     node = section.get("node")
+    node_given = node is not None
+    if node_given and (not isinstance(node, str) or not node.strip()):
+        problems.append(
+            Problem(
+                f"must be the DUT's node name in the DBC, not {kind_of(node)}",
+                where="can: node",
+            )
+        )
+        node = None
     raw_files = section.get("dbc")
     if raw_files is None:
         problems.append(
@@ -199,15 +216,35 @@ def _load_can(
     if not isinstance(raw_files, list) or not all(isinstance(f, str) for f in raw_files):
         problems.append(Problem("'can: dbc:' must be a file name or a list of file names"))
         return None, ()
+    if not raw_files:
+        problems.append(
+            Problem("'can: dbc:' is an empty list", hint="list the DBC files, or remove 'can:'")
+        )
+        return None, ()
 
     databases: list[tuple[Path, Any]] = []
+    listed: dict[Path, str] = {}
     for raw in raw_files:
         dbc_path = (description_path.parent / raw) if not Path(raw).is_absolute() else Path(raw)
+        resolved = dbc_path.resolve()
+        if resolved in listed:
+            problems.append(
+                Problem(
+                    f"DBC file '{raw}' is listed more than once"
+                    + (f" (also as '{listed[resolved]}')" if listed[resolved] != raw else ""),
+                    where="can: dbc",
+                    hint="list each DBC file once",
+                )
+            )
+            continue
+        listed[resolved] = raw
         database = _load_dbc(dbc_path, raw, problems)
         if database is not None:
             databases.append((dbc_path, database))
 
     if not isinstance(node, str) or not node:
+        if node_given:
+            return None, tuple(p for p, _ in databases)  # already reported
         nodes = sorted({n.name for _, db in databases for n in db.nodes})
         problems.append(
             Problem(
@@ -229,7 +266,17 @@ def _load_can(
                 )
             )
             continue
+        before = len(candidates)
         _import_dbc(dbc_path, database, node, candidates, skipped)
+        if len(candidates) == before:
+            problems.append(
+                Problem(
+                    f"imports no signals: node '{node}' neither sends nor receives any message "
+                    f"in {dbc_path.name}",
+                    where="can: dbc",
+                    hint="the node name, and the senders and receivers in the DBC",
+                )
+            )
 
     return node, tuple(p for p, _ in databases)
 
@@ -244,6 +291,14 @@ def _load_dbc(dbc_path: Path, raw: str, problems: list[Problem]) -> Any:
                 where="can: dbc",
                 hint=f"paths are relative to the interface description; it resolved to "
                 f"{dbc_path.resolve()}",
+            )
+        )
+    except OSError as exc:
+        problems.append(
+            Problem(
+                f"can't read DBC file '{raw}': {exc.strerror or exc}",
+                where="can: dbc",
+                hint=f"it resolved to {dbc_path.resolve()}",
             )
         )
     except (cantools.database.Error, ValueError) as exc:
@@ -323,6 +378,9 @@ def _load_inline(
         return
     where = f"{path.name}, signals:"
     for name, spec in section.items():
+        if not isinstance(name, str):
+            problems.append(_name_read_as_value(name, where))
+            continue
         if not isinstance(spec, dict):
             problems.append(
                 Problem(
@@ -368,12 +426,20 @@ def _parse_type(raw: Any, name: str, where: str, problems: list[Problem]) -> Sig
             Problem("has no type", signal=name, where=where, hint=f"set type to one of: {allowed}")
         )
         return None
+    if not isinstance(raw, str):
+        problems.append(
+            Problem(f"type must be one of {allowed}, not {kind_of(raw)}", signal=name, where=where)
+        )
+        return None
     try:
         return SignalType(raw)
     except ValueError:
         problems.append(
             Problem(
-                f"unknown type '{raw}'", signal=name, where=where, hint=f"use one of: {allowed}"
+                f"unknown type '{raw}'",
+                signal=name,
+                where=where,
+                hint=_suggest(raw, [t.value for t in SignalType]) or f"use one of: {allowed}",
             )
         )
         return None
@@ -387,11 +453,47 @@ def _parse_direction(
         if required:
             problems.append(Problem("has no direction", signal=name, where=where, hint=hint))
         return None
+    if not isinstance(raw, str):
+        problems.append(
+            Problem(
+                f"direction must be input or output, not {kind_of(raw)}",
+                signal=name,
+                where=where,
+                hint=hint,
+            )
+        )
+        return None
     try:
         return Direction(raw)
     except ValueError:
-        problems.append(Problem(f"unknown direction '{raw}'", signal=name, where=where, hint=hint))
+        suggestion = _suggest(raw, [d.value for d in Direction])
+        problems.append(
+            Problem(
+                f"unknown direction '{raw}'",
+                signal=name,
+                where=where,
+                hint=f"{suggestion} It is {hint}" if suggestion else hint,
+            )
+        )
         return None
+
+
+def _suggest(raw: str, allowed: list[str]) -> str | None:
+    """'did you mean ...?' for a near miss, including a difference only in capitals."""
+    for option in allowed:
+        if raw.strip().lower() == option:
+            return f"did you mean '{option}'? (written in lower case)"
+    close = difflib.get_close_matches(raw.strip().lower(), allowed, n=1, cutoff=0.5)
+    return f"did you mean '{close[0]}'?" if close else None
+
+
+def _name_read_as_value(name: Any, where: str) -> Problem:
+    """A key that YAML turned into a value: an unquoted on/off/yes/no/null, or a number."""
+    return Problem(
+        f"a signal name was read as {kind_of(name)}, not as a name",
+        where=where,
+        hint=f"quote it, for example 'on': {{...}}; {YAML_VALUE_WORDS}",
+    )
 
 
 def _parse_unit(
@@ -464,7 +566,9 @@ def _apply_overrides(
         return
     where = "overrides:"
     for key, spec in section.items():
-        key = str(key)
+        if not isinstance(key, str):
+            problems.append(_name_read_as_value(key, where))
+            continue
         if not isinstance(spec, dict):
             problems.append(
                 Problem(

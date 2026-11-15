@@ -24,7 +24,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from benchtare._yaml import read_mapping
+from benchtare._yaml import YAML_VALUE_WORDS, kind_of, read_mapping
 from benchtare.bench.config import BenchConfig
 from benchtare.dut.description import InterfaceDescription
 from benchtare.errors import ConfigError, Problem
@@ -257,7 +257,15 @@ class _Checker:
         result: dict[str, Endpoint] = {}
         signals = self.description.signals
         for name, target in raw.items():
-            name = str(name)
+            if not isinstance(name, str):
+                self.problems.append(
+                    Problem(
+                        f"a signal name was read as {kind_of(name)}, not as a name",
+                        where=where,
+                        hint=f"quote it, for example 'on': io.out1; {YAML_VALUE_WORDS}",
+                    )
+                )
+                continue
             signal = signals.get(name)
             if signal is None:
                 close = difflib.get_close_matches(name, list(signals), n=3)
@@ -364,8 +372,14 @@ class _Checker:
                     Problem("'within:' must be a number of seconds above 0", where=where)
                 )
                 continue
+            key = "bus" if "bus" in item else "signal"
+            if not isinstance(item[key], str):
+                self.problems.append(
+                    Problem(f"'{key}:' must be a name, not {kind_of(item[key])}", where=where)
+                )
+                continue
             if "bus" in item:
-                bus = str(item["bus"])
+                bus = item["bus"]
                 equipment = self.bench.equipment.get(bus)
                 if equipment is None or equipment.kind != "bus":
                     buses = [e.id for e in self.bench.equipment.values() if e.kind == "bus"]
@@ -379,7 +393,7 @@ class _Checker:
                     continue
                 result.append(Presence(within=float(within), bus=bus))
             else:
-                name = str(item["signal"])
+                name = item["signal"]
                 signal = self.description.signals.get(name)
                 if name not in connections or signal is None:
                     self.problems.append(
@@ -407,7 +421,16 @@ class _Checker:
         if raw is None:
             return None
         known = ", ".join(sorted(SIMULATED_DUTS))
-        if not isinstance(raw, str) or raw not in SIMULATED_DUTS:
+        if not isinstance(raw, str):
+            self.problems.append(
+                Problem(
+                    f"must name a simulated DUT, not {kind_of(raw)}",
+                    where="simulate",
+                    hint=f"simulated DUTs: {known}",
+                )
+            )
+            return None
+        if raw not in SIMULATED_DUTS:
             self.problems.append(
                 Problem(
                     f"unknown simulated DUT '{raw}'",
