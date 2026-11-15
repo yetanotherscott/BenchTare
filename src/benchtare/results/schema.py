@@ -171,6 +171,7 @@ Migration = Callable[[sqlite3.Connection], None]
 MIGRATIONS: dict[int, Migration] = {}
 
 BUSY_TIMEOUT_MS = 5000  # how long to wait for another run's write before giving up
+_RETRY_PAUSE = 0.02  # seconds between tries when SQLite answers "busy" without waiting
 
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _CHECK = "point --results at another file, or run with --no-results"
@@ -202,12 +203,13 @@ def open_database(path: Path) -> sqlite3.Connection:
         db = sqlite3.connect(path, isolation_level=None)  # transactions are explicit
     except (OSError, sqlite3.Error) as exc:
         raise ResultsError(f"can't open results database {path}: {exc}", hint=_CHECK) from None
+    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
     try:
         db.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")  # another run writing: wait
         db.execute("PRAGMA foreign_keys = ON")
-        _bring_up_to_date(db, path)
+        _patiently(lambda: _bring_up_to_date(db, path), deadline)
         # Only once the file is known to be ours: switching to WAL rewrites the file's header.
-        db.execute("PRAGMA journal_mode = WAL")
+        _patiently(lambda: db.execute("PRAGMA journal_mode = WAL"), deadline)
     except sqlite3.OperationalError as exc:
         db.close()
         if _is_busy(exc):
@@ -254,7 +256,25 @@ def _reading(db: sqlite3.Connection) -> Iterator[None]:
     try:
         yield
     finally:
-        db.execute("ROLLBACK")
+        if db.in_transaction:
+            db.execute("ROLLBACK")
+
+
+def _patiently(action: Callable[[], object], deadline: float) -> None:
+    """Run ``action``, trying again while the file is busy, until ``deadline``.
+
+    SQLite's busy timeout covers most waits, but where waiting could deadlock it answers "busy"
+    at once instead: switching a file to WAL while another run holds the write lock, say. Each
+    try is all or nothing, so trying again is safe.
+    """
+    while True:
+        try:
+            action()
+            return
+        except sqlite3.OperationalError as exc:
+            if not _is_busy(exc) or time.monotonic() >= deadline:
+                raise
+        time.sleep(_RETRY_PAUSE)
 
 
 def schema_version(db: sqlite3.Connection) -> int:

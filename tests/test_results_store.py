@@ -5,6 +5,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -304,6 +305,50 @@ def test_a_failed_migration_leaves_the_database_unchanged(path, monkeypatch):
     assert db.execute("PRAGMA user_version").fetchone()[0] == 1
     assert "notes" not in tables(db)
     db.close()
+
+
+def ours_before_switching_to_wal(path):
+    """A results database just created by another run, before that run switched it to WAL."""
+    open_database(path).close()
+    db = sqlite3.connect(path, isolation_level=None)
+    db.execute("PRAGMA journal_mode = DELETE")
+    db.close()
+
+
+def test_opening_waits_while_another_run_writes_during_the_switch_to_wal(path):
+    # With another run holding the write lock, SQLite answers "busy" at once to the switch to
+    # WAL, without waiting: opening must try again until the other run is done.
+    ours_before_switching_to_wal(path)
+    other = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    other.execute("BEGIN IMMEDIATE")
+    let_go = threading.Timer(0.3, lambda: other.execute("ROLLBACK"))
+    let_go.start()
+    started = time.monotonic()
+    try:
+        db = open_database(path)
+    finally:
+        let_go.join()
+        other.close()
+    assert time.monotonic() - started >= 0.25  # it waited for the other run
+    assert db.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    db.close()
+
+
+def test_busy_means_the_whole_timeout_went_by(path, monkeypatch):
+    monkeypatch.setattr(schema, "BUSY_TIMEOUT_MS", 300)
+    ours_before_switching_to_wal(path)
+    other = sqlite3.connect(path, isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")
+    started = time.monotonic()
+    try:
+        with pytest.raises(
+            ResultsError, match="is busy: another program held it for more than 0.3 s"
+        ):
+            schema.open_database(path)
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+    assert time.monotonic() - started >= 0.3
 
 
 def test_a_database_another_program_holds_says_so(path, monkeypatch):
