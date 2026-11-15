@@ -1,0 +1,235 @@
+# Results schema (proposal)
+
+**Status: draft for review, with its four open decisions settled (see the end).
+Nothing here is built yet.** This is the schema M5 would create as version 1,
+with the tables M6 and M8 would add later shown so that version 1 leaves room
+for them.
+
+## What it has to serve
+
+| Who reads it | What they need |
+| --- | --- |
+| M5 | Each run, its manifest, each test's outcome, duration and test record, and the self-test result |
+| M6 | Each test check, per test and mode, and when each test file was last checked |
+| M8 | The requirement IDs each test result covers |
+| Later: analysis (stage 6) | Pass rates and durations over time, and trends in measured values, so readings must be queryable, not only stored as text |
+| Later: remote database (stage 6) | Runs written locally can be copied to a shared database without ID clashes, so IDs are global and the SQL is plain |
+| Later: GUI (stage 10) | Browse runs, results and records without parsing BenchTare's own files |
+| Anyone chasing an intermittent failure | The machine and software environment each run had, so a failure that only happens on one machine, OS or package version can be found |
+
+## Principles
+
+- **One SQLite file**, `.benchtare/results.sqlite3` under pytest's rootdir by
+  default. It is set with `--results PATH` or `benchtare_results` in the ini
+  file.
+- **Plain SQL**: tables, text, integers and reals only, so the same schema works
+  on a server database later. Structured extras are JSON in TEXT columns.
+- **Global run IDs**: a run's ID is a UUID, so runs from many benches can be
+  merged. Rows inside a run are numbered within it.
+- **Times** are UTC, ISO 8601, to the microsecond:
+  `2026-11-15T18:52:09.123456Z`. They sort as text and read as dates.
+- **Paths** are relative to pytest's rootdir, with `/` separators on every OS,
+  so a results file means the same thing on Linux, Windows and macOS.
+- **Written as the run goes.** The run is stored when it starts, each test when
+  it finishes, and the run is marked finished at the end. A run that crashed
+  stays marked `running`, with every test that finished.
+- **Nothing is deleted.** There is no pruning in the first slice.
+- **On by default.** Every run is stored. `--no-results` skips it, for
+  throwaway runs while writing tests.
+- **No secrets.** Environment variables are never recorded, since they often
+  hold credentials. Nor are user names.
+
+## Version 1 tables
+
+### `meta`
+
+Facts about the database itself, one row per key.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `key` | TEXT, primary key | `schema_version`, `created_at`, `created_by` |
+| `value` | TEXT, not null | `1`; a time; `benchtare 0.1.0` |
+
+`PRAGMA user_version` holds the same schema version, so SQLite can check it
+without reading a table. The `meta` row is the copy a server database keeps.
+
+### `runs`
+
+One row per session: a test run, a self-test-only run (`benchtare selftest`), or
+a test check (M6). The version and setup columns are the manifest's summary.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | TEXT, primary key | UUID |
+| `kind` | TEXT, not null | `tests`, `selftest` or `check-tests` |
+| `status` | TEXT, not null | `running`, `finished`, or `stopped` (the self-test failed, or the run was interrupted) |
+| `started_at` | TEXT, not null | |
+| `finished_at` | TEXT | Null while running, or if it crashed |
+| `exit_code` | INTEGER | pytest's exit code |
+| `schema_version` | INTEGER, not null | The schema this run was written with |
+| `record_level` | TEXT, not null | `results`, `stimuli` or `debug` |
+| `dut` | TEXT, not null | Name from the interface description |
+| `bench` | TEXT, not null | Name from the bench file |
+| `harness` | TEXT, not null | Name from the harness file |
+| `simulated_dut` | TEXT | The harness's `simulate:` value; null with a real DUT |
+| `equipment` | TEXT, not null | JSON: each equipment item's name, backend and whether it is simulated |
+| `benchtare_version` | TEXT, not null | |
+| `pytest_version` | TEXT, not null | |
+| `args` | TEXT, not null | JSON: pytest's arguments as given |
+| `git_commit` | TEXT | The project's commit, if it is a git repository |
+| `git_dirty` | INTEGER | 1 if the working tree had uncommitted changes |
+| `tests_passed`, `tests_failed`, `tests_errors`, `tests_skipped` | INTEGER | Filled when the run finishes |
+
+The machine and software environment are in `run_environment` and
+`run_packages`, below.
+
+### `run_environment`
+
+The machine and system the run happened on, one row per run, so an
+intermittent failure can be tied to a machine, an OS or a Python build.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `run_id` | TEXT, primary key | |
+| `host` | TEXT | The machine's name |
+| `os` | TEXT, not null | `Linux`, `Windows` or `Darwin` |
+| `os_release` | TEXT | Such as `6.8.0-45-generic`, `11` or `24.1.0` |
+| `os_version` | TEXT | The OS's full version string |
+| `architecture` | TEXT | Such as `x86_64`, `AMD64` or `arm64` |
+| `processor` | TEXT | The processor name, where the OS gives one |
+| `cpu_count` | INTEGER | Logical CPUs |
+| `python_implementation` | TEXT, not null | Such as `CPython` |
+| `python_version` | TEXT, not null | Such as `3.12.3` |
+| `python_build` | TEXT | Build number, date and compiler |
+| `encoding` | TEXT | The default text encoding, such as `utf-8` or `cp1252` |
+| `timezone` | TEXT | The local timezone's name and UTC offset |
+| `ci` | TEXT | The CI system, if the run was under one (`github-actions`, `gitlab-ci`, `jenkins` and so on), found from the variables those systems set; null otherwise |
+
+Total memory isn't recorded: the standard library can't read it the same way on
+all three platforms.
+
+### `run_packages`
+
+Every Python package installed where the run happened, so "does this only fail
+with cantools 40.x?" is a query.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `run_id` | TEXT, not null | |
+| `name` | TEXT, not null | Normalised distribution name, such as `python-can` |
+| `version` | TEXT, not null | |
+
+Primary key: `run_id, name`.
+
+### `manifest_files`
+
+Every file that decided what the run tested, with its hash.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `run_id` | TEXT, not null | References `runs.id` |
+| `path` | TEXT, not null | Relative to rootdir, `/` separators. A file outside rootdir keeps its absolute path |
+| `role` | TEXT, not null | `interface`, `dbc`, `bench`, `harness`, `test`, `conftest` or `ini` |
+| `sha256` | TEXT, not null | Of the file's bytes |
+| `size` | INTEGER, not null | Bytes |
+
+Primary key: `run_id, path`.
+
+`conftest.py` files are included because staging fixtures live there, so
+changing one can change results while the test files stay the same. The ini
+file is included because it sets the record level and which files BenchTare
+loads.
+
+"Has this test file changed since it was last checked?" is then a comparison of
+two runs' `manifest_files` rows, so the manifest needs no extra columns for M6.
+
+### `selftests` and `selftest_checks`
+
+The self-test, when it ran. A run where no test used the bench has no row.
+
+`selftests`: `run_id` (primary key), `passed` (INTEGER), `started_at`,
+`duration` (REAL, seconds).
+
+`selftest_checks`: `run_id`, `seq` (order, from 1), `kind` (`equipment`,
+`simulation`, `loopback`, `presence` or `bench`), `name`, `outcome` (`passed`,
+`failed` or `skipped`), `detail`, `hint`. Primary key: `run_id, seq`.
+
+### `test_results`
+
+One row per test that ran.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `run_id` | TEXT, not null | |
+| `seq` | INTEGER, not null | Order the tests ran in, from 1 |
+| `nodeid` | TEXT, not null | pytest's ID, such as `tests/test_x.py::test_setpoint[42]` |
+| `file` | TEXT, not null | The test file, as in `manifest_files.path` |
+| `outcome` | TEXT, not null | `passed`, `failed`, `error` (setup or teardown failed), `skipped`, `xfailed` or `xpassed`, as pytest's summary counts them |
+| `message` | TEXT | The one-line reason for a failure, error or skip |
+| `details` | TEXT | The full failure report, as pytest prints it |
+| `started_at` | TEXT, not null | |
+| `setup_duration`, `call_duration`, `teardown_duration` | REAL | Seconds; null for a phase that didn't run |
+| `properties` | TEXT | JSON: values from `record_property` |
+
+Primary key: `run_id, seq`. Unique: `run_id, nodeid`.
+
+### `record_entries`
+
+The test record, one row per entry, for every test and for the self-test.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `run_id` | TEXT, not null | |
+| `seq` | INTEGER, not null | Order in the run, from 1 |
+| `test_seq` | INTEGER | The test it belongs to; null for the self-test and after the last test |
+| `phase` | TEXT, not null | `setup`, `call`, `teardown`, `selftest` or `after-last-test` |
+| `at` | TEXT, not null | |
+| `kind` | TEXT, not null | `read`, `wait_until`, `assert`, `result`, `write`, `frame_mismatch`, `equipment_failure`, `frame_sent`, `frame_received` |
+| `level` | TEXT, not null | `results`, `stimuli` or `debug` |
+| `text` | TEXT, not null | The line people read |
+| `signal` | TEXT | Signal name, or channel for a loopback |
+| `endpoint` | TEXT | Bench channel or bus |
+| `unit` | TEXT | |
+| `value` | TEXT | JSON, so `42`, `42.0`, `true` and `"run"` keep their types |
+| `value_num` | REAL | The value as a number when it is one (bools as 0 and 1), for trends |
+| `data` | TEXT | JSON: the entry's other facts (what was expected, the outcome, time waited, frame bytes) |
+
+Primary key: `run_id, seq`. Indexes: `run_id, test_seq` (one test's record),
+and `signal, at` (a signal's readings over time).
+
+## Later versions (designed now, built in their milestones)
+
+Each adds tables with a version bump and a migration, which also exercises the
+migration path early.
+
+- **Version 2, M6** — `test_checks`: `run_id`, `test_seq`, `mode` (`shift` or
+  `stale`), `outcome` (`failed`, `passed` or `timeout`), and per test a
+  verdict: able to fail or not.
+- **Version 3, M8** — `test_requirements`: `run_id`, `test_seq`,
+  `requirement_id`.
+
+## Versions and migrations
+
+- **A new file** is created at the current version.
+- **An older file** is copied to `results.sqlite3.v<N>.bak` and then migrated
+  step by step, inside one transaction. A failed migration leaves the original
+  untouched.
+- **A newer file** (written by a newer BenchTare) is refused, and nothing is
+  written: "this results database is schema 3, and this BenchTare reads up to
+  2. Check: upgrade BenchTare, or point `--results` at another file."
+- **A file that isn't a BenchTare database**, or is corrupt, is refused with a
+  message naming the file.
+- **Two runs at once** on one file wait for each other (SQLite's WAL mode and a
+  busy timeout); running tests in parallel within one run is out of scope.
+
+## Decisions settled
+
+1. **Readings are rows.** Each record entry is a row with the signal and value
+   in columns, so trends in measured values are a query.
+2. **The manifest covers the whole setup:** the interface description, DBC
+   files, bench file, harness file, test files, `conftest.py` files and the ini
+   file, plus the git commit and whether it had uncommitted changes. Each run
+   also records its machine and software environment (`run_environment`,
+   `run_packages`), for tracking down intermittent failures.
+3. **The machine's name is recorded.** User names are not.
+4. **On by default**, with `--no-results` to skip a run.

@@ -262,6 +262,9 @@ Each milestone ends with passing tests and a commit. Do them in order.
 
 ### M5: Results and manifest
 
+The schema is set out in [results-schema.md](results-schema.md); build version
+1 from it.
+
 - Results schema with a schema version from day one (`PRAGMA user_version`
   plus a `schema_version` column). A database newer than the code is refused
   with a clear message. An older one goes through a migration list.

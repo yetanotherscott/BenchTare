@@ -509,7 +509,10 @@ default), using a versioned schema. Each run stores:
   and each test file.
 
 The manifest makes a run reproducible. It shows which DUT description, bench
-and harness a result came from, and whether anything has changed since.
+and harness a result came from, and whether anything has changed since. Each
+run also records the machine and software it ran on, to help track down
+failures that only happen on one machine or with one package version. The
+tables are set out in [results-schema.md](results-schema.md).
 
 ## The reference
 

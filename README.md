@@ -25,6 +25,7 @@ hardware or simulation, and proves that its own results are reliable.
 - [Model](docs/model.md): what BenchTare models, and what each file you write is for.
 - [Design brief](docs/design-brief.md): goals, non-goals, architecture, prior art.
 - [First-slice plan](docs/first-slice-plan.md): what is being built first, and in what order.
+- [Results schema](docs/results-schema.md): what each run stores in the results database.
 
 ## License
 
