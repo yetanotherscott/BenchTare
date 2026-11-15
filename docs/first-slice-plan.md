@@ -339,6 +339,9 @@ Do not build these yet, even where the design brief describes them:
 - IDE setup for test development, such as editor schemas for the YAML files or
   run configurations (design brief, later stage 9). `benchtare init` (M7)
   writes the quickstart project only.
+- Supporting and testing Windows and macOS (design brief, later stage 11). CI
+  tests Linux only. Keep the code portable meanwhile: no Linux-only calls, and
+  paths through `pathlib`.
 - Closed-loop or real-time simulation.
 
 ## Before the first release
