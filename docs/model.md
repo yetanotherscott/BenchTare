@@ -71,6 +71,10 @@ signals:                  # signals listed directly
 overrides:                # adjust imported signals
   Setpoint: {unit: degC}
 
+identity:                 # what each run records about the DUT: see below
+  hardware_revision:
+  bootloader: {signal: BootloaderVersion}
+
 standards: []             # reserved: see below
 ```
 
@@ -91,6 +95,18 @@ Writing `unit: none` says on purpose that the signal has no unit.
 Signal names must be unique across all sources, and the error for a clash
 names both places it was defined. Names must be valid Python identifiers,
 because tests write `signals.<name>`.
+
+**Identity.** `identity:` lists what each run should record about the DUT:
+its hardware revision and software versions, such as bootloader, application
+and subsystem versions. It names the items and never holds their values, so
+the file doesn't change when the DUT's software does. An item that names a DUT
+output is read before the first test. Any other value comes from the team's
+code (`bench.identify("hardware_revision", "C")`) or the command line
+(`--identify hardware_revision=C`), at any point in the run. The list is a
+minimum: any other name can be recorded during the run too, such as the
+versions of subsystems the DUT reports. A listed item that is never collected
+is recorded as missing, with a warning. The values are stored with the run's
+results; see [results-schema.md](results-schema.md).
 
 **Standards.** A DUT may support standard protocols, such as J1939, that require
 a defined set of messages. The `standards:` key will declare these, and

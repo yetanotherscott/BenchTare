@@ -268,16 +268,29 @@ The schema is set out in [results-schema.md](results-schema.md); build version
 - Results schema with a schema version from day one (`PRAGMA user_version`
   plus a `schema_version` column). A database newer than the code is refused
   with a clear message. An older one goes through a migration list.
-- Manifest: BenchTare version, Python version, a timestamp, and hashes of the
-  interface description, its DBC files, the bench file, the harness file and
-  each test file.
-- SQLite store behind `ResultStore`, in `.benchtare/` by default and
-  configurable.
+- Manifest: BenchTare, pytest and Python versions, a timestamp, the git
+  commit, and hashes of the interface description, its DBC files, the bench
+  file, the harness file, each test file, each `conftest.py` and the ini file.
+- The run's environment: the machine, OS, Python build and installed packages.
+- Bench hardware: backends report each equipment item's vendor, model, serial
+  number, firmware and driver (`identity()` on the Backend protocol); the
+  simulated backends report themselves as simulated.
+- DUT identity: the interface description's `identity:` list, read from
+  signals before the first test, `bench.identify()` for values from the team's
+  code (any name, listed or not), and `--identify NAME=VALUE`. A listed item
+  never collected is stored as missing, with a warning.
+- SQLite store behind `ResultStore`, at `.benchtare/results.sqlite3` by
+  default; `--results PATH` or `benchtare_results` moves it, and
+  `--no-results` skips storing a run.
 - Tests:
   - two runs store two distinct manifests that read back correctly;
-  - changing a test file changes its hash;
-  - a newer-schema database is refused;
-  - a failed test is stored as failed.
+  - changing a test file or a `conftest.py` changes its hash;
+  - a newer-schema database is refused, and an older one is migrated;
+  - a failed test is stored as failed, and a crashed run stays `running`;
+  - readings can be queried across runs;
+  - identity values from a signal, from code and from the command line are
+    stored; an added name is stored; a missing listed item is stored as
+    missing and warned about.
 
 ### M6: Test check
 

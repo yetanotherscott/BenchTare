@@ -1,6 +1,6 @@
 # Results schema (proposal)
 
-**Status: draft for review, with its four open decisions settled (see the end).
+**Status: draft for review, with its open decisions settled (see the end).
 Nothing here is built yet.** This is the schema M5 would create as version 1,
 with the tables M6 and M8 would add later shown so that version 1 leaves room
 for them.
@@ -15,7 +15,7 @@ for them.
 | Later: analysis (stage 6) | Pass rates and durations over time, and trends in measured values, so readings must be queryable, not only stored as text |
 | Later: remote database (stage 6) | Runs written locally can be copied to a shared database without ID clashes, so IDs are global and the SQL is plain |
 | Later: GUI (stage 10) | Browse runs, results and records without parsing BenchTare's own files |
-| Anyone chasing an intermittent failure | The machine and software environment each run had, so a failure that only happens on one machine, OS or package version can be found |
+| Anyone chasing an intermittent failure | The machine and software environment each run had, the bench hardware and drivers, and the DUT's hardware revision and software versions, so a failure that only happens on one machine, adapter, firmware or package version can be found |
 
 ## Principles
 
@@ -72,7 +72,6 @@ a test check (M6). The version and setup columns are the manifest's summary.
 | `bench` | TEXT, not null | Name from the bench file |
 | `harness` | TEXT, not null | Name from the harness file |
 | `simulated_dut` | TEXT | The harness's `simulate:` value; null with a real DUT |
-| `equipment` | TEXT, not null | JSON: each equipment item's name, backend and whether it is simulated |
 | `benchtare_version` | TEXT, not null | |
 | `pytest_version` | TEXT, not null | |
 | `args` | TEXT, not null | JSON: pytest's arguments as given |
@@ -81,7 +80,8 @@ a test check (M6). The version and setup columns are the manifest's summary.
 | `tests_passed`, `tests_failed`, `tests_errors`, `tests_skipped` | INTEGER | Filled when the run finishes |
 
 The machine and software environment are in `run_environment` and
-`run_packages`, below.
+`run_packages`, the bench hardware in `run_equipment`, and the DUT's identity
+in `run_dut_identity`, below.
 
 ### `run_environment`
 
@@ -120,6 +120,52 @@ with cantools 40.x?" is a query.
 | `version` | TEXT, not null | |
 
 Primary key: `run_id, name`.
+
+### `run_equipment`
+
+The bench equipment the run used to drive and read the DUT's signals, one row
+per equipment item, as its backend describes it when the bench opens. Real
+hardware fills in what it can report; a simulated backend says it is simulated
+and leaves the hardware columns empty.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `run_id` | TEXT, not null | |
+| `equipment` | TEXT, not null | Its name in the bench file, such as `can0` |
+| `backend` | TEXT, not null | Such as `sim_can` or, later, `socketcan` |
+| `kind` | TEXT, not null | `channels` or `bus` |
+| `simulated` | INTEGER, not null | 1 for simulated equipment |
+| `vendor` | TEXT | Such as the adapter's maker |
+| `model` | TEXT | |
+| `serial_number` | TEXT | |
+| `firmware_version` | TEXT | The equipment's own firmware |
+| `driver` | TEXT | The driver or library that talks to it |
+| `driver_version` | TEXT | |
+| `details` | TEXT | JSON: anything else the backend reports, such as a CAN bitrate or the channels in use |
+
+Primary key: `run_id, equipment`.
+
+### `run_dut_identity`
+
+The DUT's identity for the run: its hardware revision and software versions
+(bootloader, application, subsystems, and whatever else the DUT has). The
+interface description lists the items every run is expected to collect, by name
+only; any other item can be added during the run. Each value belongs to the
+whole run, whenever it was collected.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `run_id` | TEXT, not null | |
+| `name` | TEXT, not null | Such as `bootloader` or `motor.firmware` |
+| `seq` | INTEGER, not null | 1 for the first value; a later, different value of the same item gets the next number |
+| `expected` | INTEGER, not null | 1 if the interface description lists the item |
+| `value` | TEXT | Null when an expected item was never collected |
+| `source` | TEXT, not null | `signal` (read from a DUT output), `code` (given by the team's code), `command-line`, or `missing` |
+| `at` | TEXT | When it was collected; null when missing |
+
+Primary key: `run_id, name, seq`.
+
+How the values are collected is described under "DUT identity" below.
 
 ### `manifest_files`
 
@@ -197,6 +243,48 @@ The test record, one row per entry, for every test and for the self-test.
 Primary key: `run_id, seq`. Indexes: `run_id, test_seq` (one test's record),
 and `signal, at` (a signal's readings over time).
 
+## DUT identity
+
+The interface description lists the items every run is expected to collect,
+by name only. It never holds their values:
+
+```yaml
+identity:
+  hardware_revision:                 # given by the team's code or the command line
+  bootloader: {signal: BootloaderVersion}
+  application: {signal: AppVersion}  # read from this DUT output before the first test
+```
+
+Values can be entered in three ways, as the DUT and the bench allow:
+
+- **From a signal.** An expected item that names a DUT output is read
+  automatically once the self-test has passed, before the first test, and
+  stored as text.
+- **From the team's code**, at any point in the run, typically from a session
+  fixture in `conftest.py`: `bench.identify("hardware_revision", "C")`, or
+  several at once with a mapping. Versions that need a protocol to read (a
+  diagnostic request, for example) are collected this way.
+- **From the command line**, for what a person reads off a label:
+  `pytest --identify hardware_revision=C`, repeatable.
+
+The list is a minimum, not a limit:
+
+- **Any name can be added.** `bench.identify("motor.firmware", "2.3.1")`
+  records an item the interface description doesn't list, so a DUT that
+  reports its subsystems, or a version that only matters for some runs, needs
+  no change to the file. Dotted names group related items.
+- **Missing items.** Only listed items are expected. A listed item still
+  without a value when the run ends is stored as missing and raised as a
+  pytest warning. The tests' outcomes don't change. If a name that was recorded
+  looks like the missing one (`bootloadr` for `bootloader`), the warning says
+  so, since a typo in an added name would otherwise go unnoticed.
+- **Changes during the run.** If an item gets a different value later in the
+  run (a test that reflashes the DUT, say), both values are kept, in order, and
+  the change is recorded as an unexpected event.
+- **Tests can read them.** `bench.identity` gives the values collected so far,
+  so a test can check a version like any other reading. BenchTare itself never
+  judges them.
+
 ## Later versions (designed now, built in their milestones)
 
 Each adds tables with a version bump and a migration, which also exercises the
@@ -233,3 +321,12 @@ migration path early.
    `run_packages`), for tracking down intermittent failures.
 3. **The machine's name is recorded.** User names are not.
 4. **On by default**, with `--no-results` to skip a run.
+5. **Bench hardware is recorded**: each equipment item's vendor, model, serial
+   number, firmware, driver and driver version, as far as its backend can
+   report them (`run_equipment`).
+6. **DUT identity is recorded per run** (`run_dut_identity`). The interface
+   description lists the expected items by name; values come from signals, the
+   team's code or the command line; any other name can be added during the run.
+7. **A missing expected item is recorded and warned about**; outcomes don't
+   change. Only items the interface description lists are expected.
+8. **All of this is built in M5.**

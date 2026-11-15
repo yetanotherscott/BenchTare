@@ -66,6 +66,7 @@ Use these names consistently in code, docs and messages.
 | Reference | The simulated DUT, bench and harness that ship with the package |
 | Test record | What happened at the bench during a test, kept with its result: readings, comparisons and outcomes, then stimuli, then frames |
 | Manifest | The record of what a run tested: versions and file hashes |
+| DUT identity | The DUT's hardware revision and software versions, recorded per run. The interface description lists the expected items by name, never their values |
 | Trace report | The report linking requirements, tests and results (M8) |
 
 ## Conventions
