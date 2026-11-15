@@ -59,7 +59,7 @@ benchtare/
 │   │   ├── base.py          # Backend protocol, receive buffer, read rule
 │   │   ├── sim.py           # in-process simulated I/O
 │   │   ├── sim_can.py       # virtual CAN bus through python-can
-│   │   └── _can_codec.py    # DBC encoding, shared by the bench and simulated DUT sides
+│   │   └── _can_codec.py    # DBC encoding and frame receiving, shared by both CAN sides
 │   ├── sim/
 │   │   ├── registry.py      # simulated DUTs a harness can plug in
 │   │   └── simulation.py    # wires a simulated DUT to simulated equipment
@@ -201,13 +201,33 @@ Each milestone ends with passing tests and a commit. Do them in order.
   - nothing happens when nothing is configured.
   - Tests that use `sim_can` run with `runpytest_subprocess`.
 
+### Logging (done, between M3 and M4)
+
+- Standard `logging` under the `benchtare` logger; no new dependency. See
+  "Logs" in [model.md](model.md) for what is logged at each level.
+- The plugin sets the `benchtare` logger to `DEBUG` while it is configured (and
+  restores it afterwards), so a failed test's report shows the bench's writes
+  and reads. The three files are loaded at session start, not in
+  `pytest_configure`, so pytest's live log and log file capture the loading.
+- CAN frames are received on BenchTare's own thread (`FrameReceiver`) instead
+  of python-can's `Notifier`. A frame the handler can't decode, such as a
+  multiplexer value the DBC doesn't define, used to end reception for the rest
+  of the run with nothing said. Now it is logged and skipped. A bus failure
+  stops reception, is logged, and is reported by `check()`. The same goes for
+  the `sim` sampler and the simulated DUT's CAN port.
+- Tests: what each part logs; a healthy run logs no warnings and leaves no
+  threads; a failed bus, a failed DUT port, a failed sampler, a frame that
+  doesn't match the DBC and an error handling a frame are each caught; the
+  plugin's level is set, kept when the project sets one, and restored.
+
 ### M4: Self-test
 
 - Run the bench check and the harness check (loopbacks and presence) at
   session start. If either fails, stop with `pytest.exit` and a message that
   says what failed and what to check. No tests run.
 - `benchtare selftest` runs the self-test alone. Register the `benchtare`
-  console script.
+  console script. Outside pytest, the CLI sets up logging itself: warnings and
+  errors by default, more with `-v`.
 - Tests:
   - a healthy reference setup passes;
   - a failed equipment item, a cut loopback wire and a missing DUT are each

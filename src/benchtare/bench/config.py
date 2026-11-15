@@ -16,6 +16,7 @@ A bench file names no DUT signals, so one bench can be reused for any DUT. See d
 from __future__ import annotations
 
 import difflib
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -27,6 +28,8 @@ from benchtare._yaml import YAML_VALUE_WORDS, kind_of, read_mapping
 from benchtare.backends import BACKENDS
 from benchtare.backends.base import ChannelCaps, EquipmentKind
 from benchtare.errors import ConfigError, Problem
+
+log = logging.getLogger(__name__)
 
 KIND = "bench file"
 
@@ -103,6 +106,12 @@ def load_bench_file(path: str | os.PathLike[str]) -> BenchConfig:
 
     if problems:
         raise ConfigError(path, problems, kind=KIND)
+    log.info(
+        "loaded bench file %s: bench %s, equipment %s",
+        path.name,
+        name,
+        ", ".join(f"{item.id} ({item.backend})" for item in equipment.values()),
+    )
     return BenchConfig(name=name, path=path, equipment=MappingProxyType(equipment))
 
 

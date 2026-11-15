@@ -14,6 +14,7 @@ See docs/model.md.
 
 from __future__ import annotations
 
+import logging
 import math
 import numbers
 import os
@@ -39,6 +40,8 @@ from benchtare.sim.simulation import Simulation
 
 if TYPE_CHECKING:
     from typing_extensions import Self  # typing.Self needs Python 3.11
+
+log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 1.0
 
@@ -125,15 +128,26 @@ class Bench:
                 backend.close()
             raise
         self._open = True
+        log.info(
+            "bench %s open: equipment %s; harness %s; DUT %s%s",
+            self.config.name,
+            ", ".join(f"{item.id} ({item.backend})" for item in self.config.equipment.values()),
+            self.harness.name,
+            self.description.name,
+            f" (simulated: {self.harness.simulate})" if self.harness.simulate else "",
+        )
         return self
 
     def close(self) -> None:
+        was_open = self._open
         if self.simulation is not None:
             self.simulation.stop()
             self.simulation = None
         for backend in self._backends.values():
             backend.close()
         self._open = False
+        if was_open:
+            log.info("bench %s closed", self.config.name)
 
     def __enter__(self) -> Self:
         return self
@@ -173,6 +187,7 @@ class Bench:
             message, hint = problem
             raise WriteError(f"can't write {binding.key} = {value!r}: {message}", hint=hint)
         backend = self._backends[binding.equipment]
+        log.debug("write %s = %s on %s", binding.key, _shown(binding, value), binding.endpoint)
         with self._buffer.writing():
             backend.write(binding, value)
 
@@ -181,13 +196,22 @@ class Bench:
         __tracebackhide__ = True
         binding = self._readable(signal)
         _check_timeout(timeout)
+        started = time.monotonic()
         item = self._buffer.first_after_write(binding.key, timeout)
         if item is None:
+            log.debug("read %s on %s: nothing within %g s", binding.key, binding.endpoint, timeout)
             raise ReadTimeout(
                 f"no value of {binding.key} arrived within {timeout:g} s after the last write "
                 f"(on {binding.endpoint}){self._last_seen(binding.key)}",
                 hint=self._what_to_check(binding),
             )
+        log.debug(
+            "read %s = %s on %s (after %.3f s)",
+            binding.key,
+            _shown(binding, item.value),
+            binding.endpoint,
+            time.monotonic() - started,
+        )
         self._record(binding, item.value)
         return item.value
 
@@ -205,14 +229,29 @@ class Bench:
         matches: Callable[[Any], bool] = (
             expected if _is_predicate(expected) else (lambda value: value == expected)
         )
+        started = time.monotonic()
         item = self._buffer.wait_for_match(binding.key, matches, timeout)
         if item is None:
             want = getattr(expected, "__name__", None) if _is_predicate(expected) else None
+            log.debug(
+                "wait_until %s on %s: %s not reached within %g s",
+                binding.key,
+                binding.endpoint,
+                want or repr(expected),
+                timeout,
+            )
             raise ReadTimeout(
                 f"{binding.key} did not reach {want or repr(expected)} within {timeout:g} s "
                 f"(on {binding.endpoint}){self._last_seen(binding.key)}",
                 hint=self._what_to_check(binding),
             )
+        log.debug(
+            "wait_until %s = %s on %s (after %.3f s)",
+            binding.key,
+            _shown(binding, item.value),
+            binding.endpoint,
+            time.monotonic() - started,
+        )
         self._record(binding, item.value)
         return item.value
 
@@ -290,6 +329,12 @@ def _bindings(description: InterfaceDescription, harness: HarnessConfig) -> dict
                 key=key, equipment=endpoint.equipment, channel=endpoint.channel, drive=drive
             )
     return bindings
+
+
+def _shown(binding: Binding, value: Any) -> str:
+    """A value as the log shows it: ``42.0 degC``, ``'run'``, ``True``."""
+    unit = binding.signal.unit if binding.signal is not None else None
+    return f"{value!r} {unit}" if unit else repr(value)
 
 
 def _is_predicate(expected: Any) -> bool:

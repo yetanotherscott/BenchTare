@@ -3,7 +3,7 @@
 Driven channels pass each written value to whatever the simulation wired to them. Read channels
 hold a level, set by the simulation, and are sampled like a DAQ: the current level is delivered
 every ``sample_period`` seconds. A channel with no level (nothing connected, or a cut wire)
-delivers nothing.
+delivers nothing. If sampling fails, the error is logged and ``check()`` reports it.
 
 Bench file:
 
@@ -17,6 +17,7 @@ Bench file:
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar
@@ -24,6 +25,8 @@ from typing import Any, ClassVar
 from benchtare._yaml import YAML_VALUE_WORDS, kind_of
 from benchtare.backends.base import Binding, ChannelCaps, EquipmentKind, Receiver, WriteError
 from benchtare.errors import Problem
+
+log = logging.getLogger(__name__)
 
 _OPTIONS = ("channels", "sample_period")
 _NO_LEVEL = object()
@@ -121,6 +124,7 @@ class SimIO:
         self._receiver: Receiver | None = None
         self._stop = threading.Event()
         self._sampler: threading.Thread | None = None
+        self._sampler_failure: str | None = None
 
     # --- Backend protocol -------------------------------------------------------------------
 
@@ -128,6 +132,7 @@ class SimIO:
         self._receiver = receiver
         self._read_bindings = [b for b in bindings if not b.drive]
         self._stop.clear()
+        self._sampler_failure = None
         self._sampler = threading.Thread(
             target=self._sample_loop, name=f"benchtare-sim-{self.equipment}", daemon=True
         )
@@ -142,6 +147,8 @@ class SimIO:
     def check(self) -> list[str]:
         if self._failure is not None:
             return [self._failure]
+        if self._sampler_failure is not None:
+            return [self._sampler_failure]
         if self._sampler is None or not self._sampler.is_alive():
             return ["not open"]
         return []
@@ -176,21 +183,29 @@ class SimIO:
     def fail(self, reason: str = "simulated equipment failure") -> None:
         """Simulate failed equipment: check() reports it, and nothing is read or written."""
         self._failure = reason
+        log.info("%s: simulated failure: %s", self.equipment, reason)
 
     # --- Sampling ---------------------------------------------------------------------------
 
     def _sample_loop(self) -> None:
-        while not self._stop.wait(self.sample_period):
-            receiver = self._receiver
-            if receiver is None or self._failure is not None:
-                continue
-            # Sample and deliver under the bench's lock, so a sample can't straddle a write.
-            with receiver.lock:
-                for binding in self._read_bindings:
-                    assert binding.channel is not None
-                    level = self._levels.get(binding.channel, _NO_LEVEL)
-                    if level is not _NO_LEVEL:
-                        receiver.deliver(binding.key, level)
+        try:
+            while not self._stop.wait(self.sample_period):
+                self._sample()
+        except Exception as exc:  # logged here, and check() reports it
+            self._sampler_failure = f"stopped sampling: {type(exc).__name__}: {exc}"
+            log.exception("%s %s", self.equipment, self._sampler_failure)
+
+    def _sample(self) -> None:
+        receiver = self._receiver
+        if receiver is None or self._failure is not None:
+            return
+        # Sample and deliver under the bench's lock, so a sample can't straddle a write.
+        with receiver.lock:
+            for binding in self._read_bindings:
+                assert binding.channel is not None
+                level = self._levels.get(binding.channel, _NO_LEVEL)
+                if level is not _NO_LEVEL:
+                    receiver.deliver(binding.key, level)
 
 
 def _valid_name(name: str) -> bool:

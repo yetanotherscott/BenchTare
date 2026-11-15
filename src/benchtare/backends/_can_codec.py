@@ -1,7 +1,12 @@
-"""Encoding and decoding DUT signals in CAN frames, shared by the bench and simulated sides."""
+"""CAN plumbing shared by the bench and simulated sides: encoding and decoding DUT signals in
+frames, opening virtual buses, and receiving frames on a thread."""
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +16,8 @@ import cantools
 from benchtare.dut.description import CanSignalRef
 from benchtare.signals.model import SignalType
 
+log = logging.getLogger(__name__)
+
 
 class CarryError(ValueError):
     """A value can't be carried by its signal's bits in the frame."""
@@ -19,6 +26,10 @@ class CarryError(ValueError):
         self.reason = reason
         self.limits = limits
         super().__init__(reason)
+
+
+class FrameError(ValueError):
+    """A received frame doesn't match its message in the DBC, so it can't be decoded."""
 
 
 class CanCodec:
@@ -68,7 +79,12 @@ class CanCodec:
         return message, data
 
     def decode(self, message: Any, data: bytes) -> dict[str, Any]:
-        return message.decode(data, decode_choices=True, allow_truncated=True)
+        """Decode a received frame's data. Raise ``FrameError`` if it doesn't match the DBC."""
+        try:
+            return message.decode(data, decode_choices=True, allow_truncated=True)
+        except Exception as exc:
+            # cantools raises many kinds; all mean "this frame isn't what the DBC says".
+            raise FrameError(f"message {message.name}: {exc}") from exc
 
 
 def open_virtual_bus(name: str, *, fd: bool) -> can.BusABC:
@@ -89,6 +105,103 @@ def frame(ref: CanSignalRef, data: bytes) -> can.Message:
 
 def frame_key(received: can.Message) -> tuple[int, bool]:
     return (received.arbitration_id, bool(received.is_extended_id))
+
+
+def describe_frame(received: can.Message) -> str:
+    """A frame as an engineer would read it off a bus trace: ``0x101 [8] 07 01 00 ...``."""
+    width = 8 if received.is_extended_id else 3
+    kind = " (extended)" if received.is_extended_id else ""
+    data = bytes(received.data).hex(" ")
+    return f"0x{received.arbitration_id:0{width}x}{kind} [{len(received.data)}] {data}".rstrip()
+
+
+class FrameReceiver:
+    """Receives frames from a bus on a thread of its own and hands each one to ``handle``.
+
+    python-can's Notifier stops receiving for good if a handler raises, which would leave every
+    later read timing out with nothing said. Here:
+
+    - A frame that doesn't match the DBC (``FrameError``) is logged as a warning and skipped.
+    - Any other error while handling a frame is logged with its traceback, and skipped.
+    - If the bus itself fails, reception stops, the failure is logged, and ``failure`` says
+      what happened, so the backend's ``check()`` can report it.
+
+    Each kind of bad frame is logged at most once per ``quiet_period`` seconds, with a count of
+    the ones in between, so a DUT sending a bad frame every 10 ms doesn't flood the log.
+    """
+
+    quiet_period = 1.0
+
+    def __init__(
+        self,
+        bus: can.BusABC,
+        handle: Callable[[can.Message], None],
+        *,
+        who: str,
+        poll: float = 0.05,
+    ) -> None:
+        self.who = who
+        self.failure: str | None = None
+        self._bus = bus
+        self._handle = handle
+        self._poll = poll
+        self._stop = threading.Event()
+        self._last_logged: dict[tuple[int, bool], float] = {}
+        self._unlogged: dict[tuple[int, bool], int] = {}
+        self._thread = threading.Thread(target=self._run, name=f"benchtare-rx-{who}", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self, timeout: float = 1.0) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                received = self._bus.recv(self._poll)
+            except Exception as exc:  # noqa: BLE001 - any bus error ends reception
+                if not self._stop.is_set():  # an error while closing isn't a failure
+                    self.failure = f"stopped receiving: {type(exc).__name__}: {exc}"
+                    log.error("%s %s", self.who, self.failure)
+                return
+            if received is None:
+                continue
+            try:
+                self._handle(received)
+            except FrameError as exc:
+                self._log_bad_frame(
+                    received,
+                    logging.WARNING,
+                    f"{self.who}: ignored a frame that doesn't match the DBC: "
+                    f"{describe_frame(received)}: {exc}\n"
+                    "  Check: the DBC files describe what the DUT sends",
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad frame mustn't stop reception
+                self._log_bad_frame(
+                    received,
+                    logging.ERROR,
+                    f"{self.who}: failed to handle a frame: {describe_frame(received)}: "
+                    f"{type(exc).__name__}: {exc}",
+                    exc_info=True,
+                )
+
+    def _log_bad_frame(
+        self, received: can.Message, level: int, message: str, *, exc_info: bool = False
+    ) -> None:
+        key = frame_key(received)
+        now = time.monotonic()
+        last = self._last_logged.get(key)
+        if last is not None and now - last < self.quiet_period:
+            self._unlogged[key] = self._unlogged.get(key, 0) + 1
+            return
+        self._last_logged[key] = now
+        unlogged = self._unlogged.pop(key, 0)
+        if unlogged:
+            message += f"\n  ({unlogged} more like it since the last report)"
+        log.log(level, "%s", message, exc_info=exc_info)
 
 
 def to_python(signal_type: SignalType | None, value: Any) -> Any:

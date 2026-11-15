@@ -11,6 +11,7 @@ proves the self-test catches real problems.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from functools import partial
 from typing import Any
@@ -20,6 +21,7 @@ import can
 from benchtare.backends._can_codec import (
     CanCodec,
     CarryError,
+    FrameReceiver,
     frame,
     frame_key,
     open_virtual_bus,
@@ -33,17 +35,20 @@ from benchtare.harness.config import Endpoint, HarnessConfig
 from benchtare.signals.model import Direction, SignalType
 from benchtare.sim.registry import SIMULATED_DUTS
 
+log = logging.getLogger(__name__)
+
 
 class DutCanPort:
     """The simulated DUT's connection to one virtual CAN bus."""
 
-    def __init__(self, bus_name: str, device: Any, *, fd: bool) -> None:
+    def __init__(self, equipment: str, bus_name: str, device: Any, *, fd: bool) -> None:
+        self.equipment = equipment
         self._device = device
         self._codec = CanCodec()
         self._inputs: dict[tuple[int, bool], list[tuple[Any, str, str, SignalType]]] = {}
         self._outputs: dict[str, CanSignalRef] = {}
         self._bus = open_virtual_bus(bus_name, fd=fd)
-        self._notifier: can.Notifier | None = None
+        self._frames = FrameReceiver(self._bus, self._on_frame, who=f"simulated DUT on {equipment}")
         self.cut = False
 
     def add_input(self, name: str, ref: CanSignalRef, signal_type: SignalType) -> None:
@@ -53,13 +58,15 @@ class DutCanPort:
     def add_output(self, name: str, ref: CanSignalRef) -> None:
         self._outputs[name] = ref
 
+    @property
+    def failure(self) -> str | None:
+        return self._frames.failure
+
     def start(self) -> None:
-        self._notifier = can.Notifier(self._bus, [self._on_frame], timeout=0.05)
+        self._frames.start()
 
     def stop(self) -> None:
-        if self._notifier is not None:
-            self._notifier.stop(timeout=1.0)
-            self._notifier = None
+        self._frames.stop()
         self._bus.shutdown()
 
     def send(self, name: str, value: Any) -> None:
@@ -137,11 +144,13 @@ class Simulation:
         for port in self._ports.values():
             port.start()
         self.device.start()
+        log.info("simulated DUT %s started", self._harness.simulate)
 
     def stop(self) -> None:
         self.device.stop()
         for port in self._ports.values():
             port.stop()
+        log.info("simulated DUT %s stopped", self._harness.simulate)
 
     def cut(self, endpoint: str) -> None:
         """Cut the simulated wire at ``equipment.channel``, or unplug the DUT from bus ``equipment``."""
@@ -154,6 +163,7 @@ class Simulation:
                 self._ports[equipment].cut = True
         else:
             raise ValueError(f"nothing to cut at {endpoint!r}")
+        log.info("simulated wire cut at %s", endpoint)
 
     def fail(self, equipment: str, reason: str = "simulated equipment failure") -> None:
         """Make simulated equipment fail: it reports the failure and stops passing values."""
@@ -165,7 +175,9 @@ class Simulation:
         port = self._ports.get(equipment)
         if port is None:
             assert backend.bus_name is not None, "open the backend before starting the simulation"
-            port = self._ports[equipment] = DutCanPort(backend.bus_name, self.device, fd=backend.fd)
+            port = self._ports[equipment] = DutCanPort(
+                equipment, backend.bus_name, self.device, fd=backend.fd
+            )
         return port
 
     def check(self) -> list[str]:
@@ -175,9 +187,13 @@ class Simulation:
         actions fails, but it reports what happened here, so a bug in a simulation never
         passes for a DUT that is merely slow.
         """
-        problems = [f"the simulated DUT {self._harness.simulate}: {e}" for e in self.device.errors]
+        dut = f"the simulated DUT {self._harness.simulate}"
+        problems = [f"{dut}: {e}" for e in self.device.errors]
         if not self.device.running:
-            problems.append(f"the simulated DUT {self._harness.simulate} has stopped running")
+            problems.append(f"{dut} has stopped running")
+        for port in self._ports.values():
+            if port.failure is not None:
+                problems.append(f"{dut}'s port on {port.equipment} {port.failure}")
         return problems
 
     def _route(self, name: str, value: Any) -> None:

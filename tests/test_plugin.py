@@ -1,5 +1,6 @@
 """The pytest plugin, tested with pytester against the reference DUT."""
 
+import logging
 import shutil
 import textwrap
 import threading
@@ -314,3 +315,68 @@ def test_reports_without_bench_have_no_measurements(project):
     recorder = project.inline_run(*cli())
     (call,) = [r for r in recorder.getreports("pytest_runtest_logreport") if r.when == "call"]
     assert call.benchtare_measurements == []
+
+
+# --- logging --------------------------------------------------------------------------------------
+
+FAILING_TEST = """
+import pytest
+
+def test_setpoint_is_tracked(running, bench, signals):
+    bench.write(signals.Setpoint, 42.0)
+    bench.wait_until(signals.Measured, pytest.approx(99.0, abs=0.5), timeout=0.3)
+"""
+
+
+def test_a_failed_test_shows_what_the_bench_did(project):
+    project.makepyfile(test_setpoint=FAILING_TEST)
+    result = project.runpytest(*cli())
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*Captured log setup*",
+            "*bench laptop-sim open: equipment can0 (sim_can), io (sim)*",
+            "*write ModeRequest = 'run' on io.out2*",
+            "*Captured log call*",
+            "*write Setpoint = 42.0 degC on io.out1*",
+            "*wait_until Measured on io.in1: 99.0 ± * not reached within 0.3 s*",
+        ]
+    )
+
+
+def test_loading_the_files_shows_in_the_live_log(project):
+    result = project.runpytest(*cli(), "--log-cli-level=INFO")
+    result.assert_outcomes(passed=2)
+    result.stdout.fnmatch_lines(
+        [
+            "*live log sessionstart*",
+            "*loaded interface description reference.dut.yaml: DUT reference, 6 signals*",
+            "*loaded harness file harness-io.yaml: harness reference-io*",
+        ]
+    )
+
+
+def test_a_project_level_for_benchtare_logs_is_kept(project):
+    project.makeconftest(
+        STAGING + "\nimport logging\nlogging.getLogger('benchtare').setLevel(logging.INFO)\n"
+    )
+    project.makepyfile(test_setpoint=FAILING_TEST)
+    result = project.runpytest_subprocess(*cli())
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*Captured log setup*", "*bench laptop-sim open*"])
+    assert "write Setpoint" not in result.stdout.str()
+
+
+def test_the_benchtare_log_level_is_restored_after_the_run(project):
+    assert logging.getLogger("benchtare").level == logging.NOTSET
+    project.runpytest(*cli()).assert_outcomes(passed=2)
+    assert logging.getLogger("benchtare").level == logging.NOTSET
+
+
+def test_unconfigured_runs_leave_the_log_level_alone(pytester):
+    pytester.makepyfile(
+        "import logging\n\n"
+        "def test_level():\n"
+        "    assert logging.getLogger('benchtare').level == logging.NOTSET\n"
+    )
+    pytester.runpytest().assert_outcomes(passed=1)

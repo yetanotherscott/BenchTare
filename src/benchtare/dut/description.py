@@ -19,6 +19,7 @@ Numeric signals must declare a unit. ``unit: none`` says a signal deliberately h
 from __future__ import annotations
 
 import difflib
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -28,7 +29,7 @@ from typing import Any
 
 import cantools
 
-from benchtare._yaml import YAML_VALUE_WORDS, kind_of, read_mapping
+from benchtare._yaml import YAML_VALUE_WORDS, count, kind_of, read_mapping
 from benchtare.errors import ConfigError, Problem
 from benchtare.signals.model import (
     NUMERIC_TYPES,
@@ -38,6 +39,8 @@ from benchtare.signals.model import (
     SignalSet,
     SignalType,
 )
+
+log = logging.getLogger(__name__)
 
 KIND = "interface description"
 
@@ -137,15 +140,22 @@ def load_interface_description(path: str | os.PathLike[str]) -> InterfaceDescrip
     if problems:
         raise ConfigError(path, problems, kind=KIND)
 
+    can_signals = {c.name: c.can_ref for c in candidates if c.can_ref is not None}
+    log.info(
+        "loaded interface description %s: DUT %s, %s (%d from DBC files, %d listed inline)",
+        path.name,
+        name,
+        count(len(signals), "signal"),
+        len(can_signals),
+        len(signals) - len(can_signals),
+    )
     return InterfaceDescription(
         name=name,
         path=path,
         signals=SignalSet(signals),
         can_node=can_node,
         dbc_files=dbc_files,
-        can_signals=MappingProxyType(
-            {c.name: c.can_ref for c in candidates if c.can_ref is not None}
-        ),
+        can_signals=MappingProxyType(can_signals),
     )
 
 
@@ -275,8 +285,27 @@ def _load_can(
             )
             continue
         before = len(candidates)
-        _import_dbc(dbc_path, database, node, candidates, skipped)
-        if len(candidates) == before:
+        unused = _import_dbc(dbc_path, database, node, candidates, skipped)
+        imported = len(candidates) - before
+        if imported:
+            log.info(
+                "%s: imported %s from %s for node %s%s",
+                description_path.name,
+                count(imported, "signal"),
+                dbc_path.name,
+                node,
+                f"; skipped {count(len(unused), 'signal')} it neither sends nor receives"
+                if unused
+                else "",
+            )
+            if unused:
+                log.debug(
+                    "%s: skipped from %s: %s",
+                    description_path.name,
+                    dbc_path.name,
+                    ", ".join(unused),
+                )
+        else:
             problems.append(
                 Problem(
                     f"imports no signals: node '{node}' neither sends nor receives any message "
@@ -320,7 +349,9 @@ def _import_dbc(
     node: str,
     candidates: list[_Candidate],
     skipped: dict[str, str],
-) -> None:
+) -> list[str]:
+    """Add the signals the DUT node sends or receives. Return the ones it doesn't use."""
+    unused: list[str] = []
     for message in database.messages:
         sent_by_dut = node in message.senders
         for dbc_signal in message.signals:
@@ -331,6 +362,7 @@ def _import_dbc(
                 direction = Direction.INPUT
             else:
                 skipped[qualified] = f"{dbc_path.name}, message {message.name}"
+                unused.append(qualified)
                 continue
             signal_type, values = _dbc_type(dbc_signal)
             dbc_unit = (dbc_signal.unit or "").strip()
@@ -354,6 +386,7 @@ def _import_dbc(
                     ),
                 )
             )
+    return unused
 
 
 def _dbc_type(dbc_signal: Any) -> tuple[SignalType, tuple[str, ...]]:

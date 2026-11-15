@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import heapq
 import itertools
+import logging
 import math
 import numbers
 import threading
@@ -32,6 +33,8 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 Publish = Callable[[str, Any], None]
+
+log = logging.getLogger(__name__)
 
 
 class ReferenceDevice:
@@ -152,8 +155,9 @@ class ReferenceDevice:
                 heapq.heappop(self._events)
                 try:
                     action()
-                except Exception as exc:  # noqa: BLE001 - keep the device alive, and report it
+                except Exception as exc:  # keep the device alive, and report it
                     self.errors.append(f"{type(exc).__name__}: {exc}")
+                    log.exception("reference DUT: an action failed: %s", self.errors[-1])
 
 
 def _is_number(value: Any) -> bool:

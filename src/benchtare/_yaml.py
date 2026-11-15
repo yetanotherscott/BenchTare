@@ -156,6 +156,11 @@ def a(noun: str) -> str:
     return f"{'an' if noun[:1].lower() in 'aeiou' else 'a'} {noun}"
 
 
+def count(number: int, noun: str, plural: str | None = None) -> str:
+    """'1 signal', '3 signals', '2 presence checks'."""
+    return f"{number} {noun if number == 1 else plural or noun + 's'}"
+
+
 def kind_of(value: object) -> str:
     """Describe what YAML made of a value, for messages: 'a list', 'a number', ..."""
     if value is None:

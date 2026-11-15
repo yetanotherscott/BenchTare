@@ -17,6 +17,7 @@ The harness is checked against the interface description and the bench file when
 from __future__ import annotations
 
 import difflib
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -24,13 +25,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from benchtare._yaml import YAML_VALUE_WORDS, kind_of, read_mapping
+from benchtare._yaml import YAML_VALUE_WORDS, count, kind_of, read_mapping
 from benchtare.backends import BACKENDS
 from benchtare.bench.config import BenchConfig, EquipmentConfig
 from benchtare.dut.description import InterfaceDescription
 from benchtare.errors import ConfigError, Problem
 from benchtare.signals.model import Direction, Signal
 from benchtare.sim.registry import SIMULATED_DUTS
+
+log = logging.getLogger(__name__)
 
 KIND = "harness file"
 
@@ -110,6 +113,15 @@ def load_harness_file(
 
     if problems:
         raise ConfigError(path, problems, kind=KIND)
+    log.info(
+        "loaded harness file %s: harness %s, %s, %s, %s%s",
+        path.name,
+        name,
+        count(len(connections), "connection"),
+        count(len(loopbacks), "loopback"),
+        count(len(presence), "presence check"),
+        f", simulating DUT {simulate}" if simulate else "",
+    )
     return HarnessConfig(
         name=name,
         path=path,

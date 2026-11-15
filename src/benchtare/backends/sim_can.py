@@ -6,6 +6,9 @@ process never hear each other, unless the bench file fixes the name with ``bus:`
 
 Like a real interface, the bus carries CAN FD frames only when it is opened in FD mode.
 
+Frames are received on a thread of their own (see ``FrameReceiver``). A frame that doesn't
+match the DBC is logged and skipped; if the bus fails, ``check()`` reports it.
+
 Bench file:
 
     can0:
@@ -16,6 +19,7 @@ Bench file:
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar
@@ -26,6 +30,8 @@ from benchtare._yaml import kind_of
 from benchtare.backends._can_codec import (
     CanCodec,
     CarryError,
+    FrameReceiver,
+    describe_frame,
     frame,
     frame_key,
     open_virtual_bus,
@@ -33,6 +39,8 @@ from benchtare.backends._can_codec import (
 )
 from benchtare.backends.base import Binding, ChannelCaps, EquipmentKind, Receiver, WriteError
 from benchtare.errors import Problem
+
+log = logging.getLogger(__name__)
 
 _OPTIONS = ("bus", "fd")
 
@@ -77,7 +85,7 @@ class SimCan:
         self._fixed_bus_name: str | None = options.get("bus")
         self.bus_name: str | None = None
         self._bus: can.BusABC | None = None
-        self._notifier: can.Notifier | None = None
+        self._frames: FrameReceiver | None = None
         self._codec = CanCodec()
         self._receiver: Receiver | None = None
         self._rx: dict[tuple[int, bool], list[tuple[Any, Binding]]] = {}
@@ -92,21 +100,31 @@ class SimCan:
             self._rx.setdefault(binding.can.frame_key, []).append((message, binding))
         self.bus_name = self._fixed_bus_name or f"benchtare-{self.equipment}-{uuid.uuid4().hex}"
         self._bus = open_virtual_bus(self.bus_name, fd=self.fd)
-        self._notifier = can.Notifier(self._bus, [self._on_frame], timeout=0.05)
+        self._frames = FrameReceiver(self._bus, self._on_frame, who=self.equipment)
+        self._frames.start()
+        log.debug(
+            "%s: opened virtual CAN bus %s%s",
+            self.equipment,
+            self.bus_name,
+            " (FD)" if self.fd else "",
+        )
 
     def close(self) -> None:
-        if self._notifier is not None:
-            self._notifier.stop(timeout=1.0)
-            self._notifier = None
+        if self._frames is not None:
+            self._frames.stop()
+            self._frames = None
         if self._bus is not None:
             self._bus.shutdown()
             self._bus = None
+            log.debug("%s: closed virtual CAN bus %s", self.equipment, self.bus_name)
 
     def check(self) -> list[str]:
         if self._failure is not None:
             return [self._failure]
-        if self._bus is None:
+        if self._bus is None or self._frames is None:
             return ["not open"]
+        if self._frames.failure is not None:
+            return [self._frames.failure]
         return []
 
     def write(self, binding: Binding, value: Any) -> None:
@@ -131,11 +149,14 @@ class SimCan:
                 f"in message {ref.message} ({exc.reason})",
                 hint=exc.limits,
             ) from None
-        self._bus.send(frame(ref, data))
+        sent = frame(ref, data)
+        self._bus.send(sent)
+        log.debug("%s: sent %s %s", self.equipment, ref.message, describe_frame(sent))
 
     def fail(self, reason: str = "simulated equipment failure") -> None:
         """Simulate a failed CAN interface: check() reports it, and nothing passes."""
         self._failure = reason
+        log.info("%s: simulated failure: %s", self.equipment, reason)
 
     def _on_frame(self, received: can.Message) -> None:
         listening = self._rx.get(frame_key(received))

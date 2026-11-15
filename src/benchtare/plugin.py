@@ -15,14 +15,21 @@ Command-line paths are relative to where pytest is run, and ini paths to the ini
 
 - **Nothing set.** The plugin does nothing, so installing BenchTare never changes another
   project's test run.
-- **All three set.** The files are loaded and checked when pytest starts. A wrong file stops
-  the run with the file's problems before any test runs.
+- **All three set.** The files are loaded and checked when the test session starts. A wrong
+  file stops the run with the file's problems before any test runs.
 - **Opening the bench.** That happens the first time a test asks for ``bench``, so tests that
   don't need it can run without the equipment.
+
+Logging: BenchTare logs under the ``benchtare`` logger, and pytest captures it like any other.
+While BenchTare is configured, that logger is set to DEBUG (unless the project has set its level
+already), so the report of a failed test shows what the bench wrote and read. Loading the files
+happens at session start rather than in ``pytest_configure`` so that pytest's live log and log
+file capture it.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -45,6 +52,10 @@ SETTINGS = {
 SESSION_PLUGIN = "benchtare-session"
 
 _MEASUREMENTS = pytest.StashKey[dict[str, list[Measurement]]]()
+_PATHS = pytest.StashKey[dict[str, Path]]()
+_LOG_LEVEL_SET = pytest.StashKey[bool]()
+
+LOGGER = logging.getLogger("benchtare")
 
 NOT_CONFIGURED = (
     "this test uses BenchTare's '{fixture}' fixture, but BenchTare isn't configured\n"
@@ -99,13 +110,33 @@ def pytest_configure(config: pytest.Config) -> None:
     paths = configured_paths(config)
     if paths is None:
         return
+    config.stash[_PATHS] = paths
+    # Bench activity is logged at DEBUG. Let pytest's handlers see it, so a failed test's report
+    # shows it, unless the project has already chosen a level for BenchTare's logger.
+    if LOGGER.level == logging.NOTSET:
+        LOGGER.setLevel(logging.DEBUG)
+        config.stash[_LOG_LEVEL_SET] = True
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    paths = session.config.stash.get(_PATHS, None)
+    if paths is None:
+        return
     try:
         description = load_interface_description(paths["dut"])
         bench_config = load_bench_file(paths["bench"])
         harness = load_harness_file(paths["harness"], description, bench_config)
     except ConfigError as exc:
         raise pytest.UsageError(f"BenchTare can't start.\n{exc}") from None
-    config.pluginmanager.register(BenchSession(description, bench_config, harness), SESSION_PLUGIN)
+    session.config.pluginmanager.register(
+        BenchSession(description, bench_config, harness), SESSION_PLUGIN
+    )
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    if config.stash.get(_LOG_LEVEL_SET, False):
+        LOGGER.setLevel(logging.NOTSET)
 
 
 # --- fixtures ------------------------------------------------------------------------------------
