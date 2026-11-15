@@ -357,6 +357,9 @@ Do not build these yet, even where the design brief describes them:
 - IDE setup for test development, such as editor schemas for the YAML files or
   run configurations (design brief, later stage 9). `benchtare init` (M7)
   writes the quickstart project only.
+- A full user guide with worked examples (design brief, later stage 12). M7
+  writes the README quickstart only; recommended practices found along the way
+  go on the brief's list of guide topics.
 - Platform-specific hardware support and setup guides (design brief, later
   stage 11). The first slice is tested on Linux, Windows and macOS: keep it
   portable, with no OS-specific calls and paths through `pathlib`.

@@ -167,13 +167,24 @@ proposal.
 | 9 | Test development in IDEs | Setup for writing and debugging tests in common IDEs, such as VS Code and PyCharm: schemas so the editor completes and checks interface descriptions, bench files and harness files; completion of signal names in tests; run and debug configurations; `benchtare init` writing them for a new project |
 | 10 | GUI | A graphical front end for people who don't live in a terminal, for example to run the self-test and tests, follow a run, and browse results and test records. It drives pytest and reads the results database; it doesn't replace either. Scope to be decided |
 | 11 | Platforms | Linux, Windows and macOS supported on real hardware as well as in simulation: hardware backends that work on each (SocketCAN, from stage 2, is Linux-only, so Windows and macOS need vendor CAN adapters through python-can's interfaces, such as PCAN or Kvaser); install and setup guides for each |
+| 12 | User guide | A comprehensive user guide with worked examples, beyond the README quickstart: recommended ways to do common things, built from the topics collected below |
 
-Stages 9 to 11 are on the horizon rather than planned in detail. None is
+Stages 9 to 12 are on the horizon rather than planned in detail. None is
 needed for the first slice, but the first slice shouldn't make them harder: the
 file formats, the CLI and the results schema are what they will build on. The
 first slice already runs on all three platforms: CI tests it on Linux, Windows
 and macOS, and the code stays portable (no OS-specific calls, paths through
 `pathlib`).
+
+**User guide topics so far.** Recommended practices that come up while the
+first slice is designed, kept here until the guide is written:
+
+- **DUT identity in CI/CD pipelines.** A pipeline knows which firmware build
+  and hardware it is testing. It can pass them on the command line
+  (`pytest --identify application=$FIRMWARE_VERSION`, with the shell filling in
+  the variable), or a session fixture in `conftest.py` can read them from
+  environment variables and call `bench.identify(...)`. BenchTare never reads
+  environment variables itself: the team's code chooses which to record.
 
 ## Prior art
 

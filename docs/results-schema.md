@@ -267,6 +267,13 @@ Values can be entered in three ways, as the DUT and the bench allow:
 - **From the command line**, for what a person reads off a label:
   `pytest --identify hardware_revision=C`, repeatable.
 
+In a CI/CD pipeline, the build being tested is usually known from environment
+variables the pipeline sets. The recommended way to record it is either of the
+last two: `--identify application=$FIRMWARE_VERSION` on the command line, or a
+session fixture that reads the variables and calls `bench.identify`. BenchTare
+never reads environment variables itself (see "No secrets" above). This is one
+of the user guide's topics (design brief, later stage 12).
+
 The list is a minimum, not a limit:
 
 - **Any name can be added.** `bench.identify("motor.firmware", "2.3.1")`
