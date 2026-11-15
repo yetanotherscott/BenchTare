@@ -5,7 +5,10 @@ See docs/results-schema.md for what each table holds and why. In short:
 - A new file is created at ``SCHEMA_VERSION``.
 - An older file is copied to ``<name>.v<N>.bak`` and migrated step by step in one transaction,
   so a failed migration leaves it as it was.
-- A newer file, or a file that isn't a BenchTare results database, is refused.
+- A newer file, or a file that isn't a BenchTare results database, is refused and left as it
+  was.
+- Two runs opening the file at once decide whether to create or upgrade it while holding the
+  write lock, so only one does it.
 
 The version is kept twice: in SQLite's ``PRAGMA user_version``, which can be read without any
 table, and in the ``meta`` table, which is the copy a server database would keep.
@@ -167,6 +170,8 @@ TABLES_V1 = (
 Migration = Callable[[sqlite3.Connection], None]
 MIGRATIONS: dict[int, Migration] = {}
 
+BUSY_TIMEOUT_MS = 5000  # how long to wait for another run's write before giving up
+
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _CHECK = "point --results at another file, or run with --no-results"
 
@@ -198,20 +203,33 @@ def open_database(path: Path) -> sqlite3.Connection:
     except (OSError, sqlite3.Error) as exc:
         raise ResultsError(f"can't open results database {path}: {exc}", hint=_CHECK) from None
     try:
-        db.execute("PRAGMA busy_timeout = 5000")  # another run writing: wait, don't fail
+        db.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")  # another run writing: wait
         db.execute("PRAGMA foreign_keys = ON")
-        db.execute("PRAGMA journal_mode = WAL")
         _bring_up_to_date(db, path)
+        # Only once the file is known to be ours: switching to WAL rewrites the file's header.
+        db.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError as exc:
+        db.close()
+        if _is_busy(exc):
+            raise _busy(path) from None
+        raise _unreadable(path, exc) from None
     except sqlite3.DatabaseError as exc:
         db.close()
-        raise ResultsError(
-            f"results database {path} can't be read: {exc}",
-            hint=f"the file may be damaged; {_CHECK}",
-        ) from None
+        raise _unreadable(path, exc) from None
     except ResultsError:
         db.close()
         raise
     return db
+
+
+def write_failed(path: Path, exc: sqlite3.Error) -> ResultsError:
+    """What to tell the engineer when a write to the database at ``path`` failed."""
+    if isinstance(exc, sqlite3.OperationalError) and _is_busy(exc):
+        return _busy(path)
+    return ResultsError(
+        f"results database {path} couldn't be written: {exc}",
+        hint=f"that the disk isn't full and the file and its folder can be written; or {_CHECK}",
+    )
 
 
 @contextmanager
@@ -221,7 +239,10 @@ def transaction(db: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     try:
         yield db
     except BaseException:
-        db.execute("ROLLBACK")
+        # SQLite rolls some failures back itself (a full disk, say); don't hide the failure
+        # behind "no transaction is active".
+        if db.in_transaction:
+            db.execute("ROLLBACK")
         raise
     db.execute("COMMIT")
 
@@ -246,6 +267,21 @@ def _check_is_sqlite(path: Path) -> None:
 
 
 def _bring_up_to_date(db: sqlite3.Connection, path: Path) -> None:
+    # A first look without a write lock, so a file that isn't ours is refused untouched.
+    if _usable_version(db, path) == SCHEMA_VERSION:
+        return
+    # Then decide again holding the write lock: two runs starting together on a new or older
+    # file must not both create or upgrade it. The second waits, then finds it done.
+    with transaction(db):
+        version = _usable_version(db, path)
+        if version == 0:
+            _create(db)
+        elif version < SCHEMA_VERSION:
+            _migrate(db, path, version)
+
+
+def _usable_version(db: sqlite3.Connection, path: Path) -> int:
+    """The file's schema version: 0 for an empty file. Raise if it isn't ours to write."""
     version = schema_version(db)
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if version == 0:
@@ -255,8 +291,7 @@ def _bring_up_to_date(db: sqlite3.Connection, path: Path) -> None:
                 f"tables ({', '.join(sorted(tables))})",
                 hint=_CHECK,
             )
-        _create(db)
-        return
+        return 0
     if "meta" not in tables:
         raise ResultsError(
             f"{path} isn't a BenchTare results database: it has no meta table", hint=_CHECK
@@ -268,30 +303,29 @@ def _bring_up_to_date(db: sqlite3.Connection, path: Path) -> None:
             "it won't write to it",
             hint=f"upgrade BenchTare, or {_CHECK}",
         )
-    if version < SCHEMA_VERSION:
-        _migrate(db, path, version)
+    return version
 
 
 def _create(db: sqlite3.Connection) -> None:
-    with transaction(db):
-        for statement in TABLES_V1:
-            db.execute(statement)
-        for upgrade in range(1, SCHEMA_VERSION):
-            MIGRATIONS[upgrade](db)
-        _set_version(db, SCHEMA_VERSION)
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        db.executemany(
-            "INSERT INTO meta (key, value) VALUES (?, ?)",
-            [("created_at", now), ("created_by", f"benchtare {__version__}")],
-        )
+    """Create the tables. Called inside the transaction that holds the write lock."""
+    for statement in TABLES_V1:
+        db.execute(statement)
+    for upgrade in range(1, SCHEMA_VERSION):
+        MIGRATIONS[upgrade](db)
+    _set_version(db, SCHEMA_VERSION)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    db.executemany(
+        "INSERT INTO meta (key, value) VALUES (?, ?)",
+        [("created_at", now), ("created_by", f"benchtare {__version__}")],
+    )
 
 
 def _migrate(db: sqlite3.Connection, path: Path, version: int) -> None:
+    """Back up, then upgrade. Called inside the transaction that holds the write lock, so no
+    other run writes between the backup and the upgrade; any failure rolls the upgrade back."""
     backup = path.with_name(f"{path.name}.v{version}.bak")
     try:
-        with sqlite3.connect(backup) as copy:
-            db.backup(copy)
-        copy.close()
+        _back_up(path, backup)
     except (OSError, sqlite3.Error) as exc:
         raise ResultsError(
             f"results database {path} needs upgrading from schema version {version} to "
@@ -299,16 +333,54 @@ def _migrate(db: sqlite3.Connection, path: Path, version: int) -> None:
             hint=f"that the folder is writable, or {_CHECK}",
         ) from None
     try:
-        with transaction(db):
-            for step in range(version, SCHEMA_VERSION):
-                MIGRATIONS[step](db)
-            _set_version(db, SCHEMA_VERSION)
+        for step in range(version, SCHEMA_VERSION):
+            MIGRATIONS[step](db)
+        _set_version(db, SCHEMA_VERSION)
     except Exception as exc:  # noqa: BLE001 - any failure: the transaction is rolled back
         raise ResultsError(
             f"couldn't upgrade results database {path} from schema version {version}: "
             f"{type(exc).__name__}: {exc}. It is unchanged, and a copy is in {backup}",
             hint=_CHECK,
         ) from None
+
+
+def _back_up(path: Path, backup: Path) -> None:
+    # A second connection reads the file: SQLite can't back up through the connection that
+    # holds the write lock. Nothing has been written yet, so it reads the file as it is.
+    source = sqlite3.connect(path, isolation_level=None)
+    try:
+        copy = sqlite3.connect(backup)
+        try:
+            source.backup(copy)
+        finally:
+            copy.close()
+    finally:
+        source.close()
+
+
+def _is_busy(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)  # Python 3.11 and later
+    if code is not None:
+        return code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    return "locked" in str(exc)  # SQLite's own wording, the same on every OS
+
+
+def _busy(path: Path) -> ResultsError:
+    return ResultsError(
+        f"results database {path} is busy: another program held it for more than "
+        f"{BUSY_TIMEOUT_MS / 1000:g} s",
+        hint=(
+            "close whatever holds it, such as a database browser with unsaved changes or "
+            f"another BenchTare run upgrading it, and run again; or {_CHECK}"
+        ),
+    )
+
+
+def _unreadable(path: Path, exc: sqlite3.Error) -> ResultsError:
+    return ResultsError(
+        f"results database {path} can't be read: {exc}",
+        hint=f"the file may be damaged; {_CHECK}",
+    )
 
 
 def _set_version(db: sqlite3.Connection, version: int) -> None:

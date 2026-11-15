@@ -7,8 +7,8 @@ bench file and harness file exactly as a test run does: from ``--dut``, ``--benc
 ``--harness``, or from the ini file. It lists every check. Any other options go to pytest:
 ``-c`` chooses the ini file, and ``--log-cli-level=DEBUG`` shows BenchTare's own log.
 
-Exit codes: 0 when the self-test passed, 1 when it failed, and 4 when it couldn't start
-(BenchTare isn't configured, or a file is wrong).
+Exit codes: 0 when the self-test passed, 1 when it failed, 2 when its results couldn't be
+stored, and 4 when it couldn't start (BenchTare isn't configured, or a file is wrong).
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         description=f"Run BenchTare's self-test: {SELFTEST_HELP}. It uses the same files and "
         "settings as a test run, and passes any other options to pytest (for example --dut, "
         "--bench and --harness, or -c to choose the ini file).",
-        epilog="Exit codes: 0 passed, 1 failed, 4 couldn't start.",
+        epilog="Exit codes: 0 passed, 1 failed, 2 results couldn't be stored, 4 couldn't start.",
     )
     args, rest = parser.parse_known_args(argv)
     if args.command == "selftest":

@@ -313,9 +313,36 @@ migration path early.
   written: "this results database is schema 3, and this BenchTare reads up to
   2. Check: upgrade BenchTare, or point `--results` at another file."
 - **A file that isn't a BenchTare database**, or is corrupt, is refused with a
-  message naming the file.
+  message naming the file, and left exactly as it was. (Switching a file to
+  SQLite's WAL mode rewrites its header, so that happens only once the file is
+  known to be a BenchTare database.)
 - **Two runs at once** on one file wait for each other (SQLite's WAL mode and a
-  busy timeout); running tests in parallel within one run is out of scope.
+  five-second busy timeout). That includes two runs that find the file new or
+  older at the same moment: deciding whether to create or upgrade it happens
+  while holding the write lock, so one run does it while the other waits, then
+  finds it done. Running tests in parallel within one run is out of scope.
+- **A write that fails stops the run.** If the file can't be written (another
+  program holds it for longer than the timeout, the disk is full, the file has
+  become read-only), the run stops with a message naming the file, what was
+  being stored and what to check, and exits with code 2. A run that can't
+  start its record (when the session starts) is a usage error, code 4. What
+  was stored before stays, and the run stays `running`, like a run that
+  crashed. A write that fails at the end, after every test has run, is shown in
+  the summary and also gives code 2: a run whose results aren't kept doesn't
+  pass.
+
+## Where the file can be
+
+- **Any folder on a local disk.** Folders that don't exist are made, and paths
+  with spaces or non-ASCII characters work.
+- **Relative paths:** a relative `--results` is from where pytest runs; a
+  relative `benchtare_results` is from the folder of the ini file; the default
+  is `.benchtare/results.sqlite3` under pytest's rootdir. `~` is the home
+  folder.
+- **Not a network drive.** SQLite can't safely share one file between machines
+  over a network file system, and WAL mode needs every run on the same machine.
+  Runs from several benches are collected in one place by the remote database,
+  later.
 
 ## Decisions settled
 

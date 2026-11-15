@@ -100,7 +100,7 @@ def test_selftest_help_explains_the_command(project):
     result.stdout.fnmatch_lines(
         [
             "Run BenchTare's self-test: check the bench and the harness, without running*",
-            "Exit codes: 0 passed, 1 failed, 4 couldn't start.",
+            "Exit codes: 0 passed, 1 failed, 2 results couldn't be stored, 4 couldn't*",
         ]
     )
 

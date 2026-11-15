@@ -7,6 +7,9 @@ import textwrap
 import pytest
 
 from benchtare import reference
+from benchtare.results import schema
+from benchtare.results.schema import write_failed
+from benchtare.results.store import SQLiteStore
 
 FILES = [reference.DUT, reference.DBC, reference.BENCH, reference.HARNESS_CAN, reference.HARNESS_IO]
 CLI = [f"--dut={reference.DUT}", f"--bench={reference.BENCH}", f"--harness={reference.HARNESS_IO}"]
@@ -334,6 +337,60 @@ def test_results_path_on_the_command_line_and_in_the_ini_file(project):
     assert query(project, "SELECT count(*) FROM runs", "ini-results.sqlite3") == [(1,)]
 
 
+def test_relative_paths_follow_where_pytest_runs_and_where_the_ini_file_is(project, monkeypatch):
+    project.makeini("[pytest]\n")
+    here = project.mkdir("sub")
+    monkeypatch.chdir(here)  # pytest is run from a folder below the project's rootdir
+    absolute = [
+        f"--{option}={project.path / name}"
+        for option, name in zip(
+            ("dut", "bench", "harness"), (reference.DUT, reference.BENCH, reference.HARNESS_IO)
+        )
+    ]
+    tests = str(project.path / "test_bench.py")
+    project.runpytest(*absolute, tests)
+    assert (project.path / ".benchtare" / "results.sqlite3").is_file()  # under the rootdir
+    project.runpytest(*absolute, "--results=runs.sqlite3", tests)
+    assert (here / "runs.sqlite3").is_file()  # where pytest was run
+    project.makeini("[pytest]\nbenchtare_results = stored/runs.sqlite3\n")
+    project.runpytest(*absolute, tests)
+    assert (project.path / "stored" / "runs.sqlite3").is_file()  # beside the ini file
+    assert sorted(p.name for p in here.iterdir() if not p.name.startswith(".")) == ["runs.sqlite3"]
+    assert not (here / ".benchtare").exists()
+
+
+def test_results_can_go_to_an_absolute_path_or_the_home_folder(
+    project, tmp_path_factory, monkeypatch
+):
+    elsewhere = tmp_path_factory.mktemp("shared drive") / "bench 1" / "results.sqlite3"
+    project.runpytest(*CLI, f"--results={elsewhere}")
+    assert query(project, "SELECT count(*) FROM runs", elsewhere) == [(1,)]
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))  # where ~ is on Linux and macOS
+    monkeypatch.setenv("USERPROFILE", str(home))  # and on Windows
+    project.runpytest(*CLI, "--results=~/bench-results/runs.sqlite3")
+    stored = home / "bench-results" / "runs.sqlite3"
+    assert query(project, "SELECT count(*) FROM runs", stored) == [(1,)]
+    assert not (project.path / ".benchtare").exists()
+
+
+def test_later_runs_leave_every_row_of_earlier_runs_as_it_was(project, database_rows):
+    project.runpytest(*CLI)
+    path = project.path / ".benchtare" / "results.sqlite3"
+    before = database_rows(path)
+    (first_run,) = {row[0] for row in before["runs"]}
+    project.makepyfile(test_bench=TESTS + "\n# changed\n")
+    project.runpytest(*CLI, "--identify=hardware_revision=C")
+    project.runpytest(*CLI, "--selftest-only")
+    after = database_rows(path)
+    for table, rows in before.items():
+        assert not rows - after[table], f"rows of {table} were changed or removed"
+    assert len(after["runs"]) == 3
+    added = {table: rows - before[table] for table, rows in after.items() if table != "meta"}
+    assert all(first_run not in {row[0] for row in rows} for rows in added.values())
+    assert not after["meta"] - before["meta"]
+
+
 def test_a_newer_results_database_stops_the_run_before_it_starts(project):
     project.runpytest(*CLI)
     db = sqlite3.connect(project.path / ".benchtare" / "results.sqlite3")
@@ -351,6 +408,132 @@ def test_a_newer_results_database_stops_the_run_before_it_starts(project):
             ),
         ]
     )
+
+
+# --- results that can't be stored -------------------------------------------------------------------
+
+
+def disk_full(store, *args, **kwargs):
+    """A store write that fails as it would on a full disk."""
+    raise write_failed(store.path, sqlite3.OperationalError("database or disk is full"))
+
+
+def test_a_database_held_during_the_run_stops_it_with_a_clear_message(project):
+    project.makeconftest(
+        STAGING + "\nfrom benchtare.results import schema\n\nschema.BUSY_TIMEOUT_MS = 200\n"
+    )
+    project.makepyfile(
+        test_bench="""
+        import sqlite3
+
+        HELD = []
+
+
+        def test_first(bench):
+            pass
+
+
+        def test_holds_the_database(bench):
+            db = sqlite3.connect(".benchtare/results.sqlite3", isolation_level=None)
+            db.execute("BEGIN IMMEDIATE")  # a database browser with unsaved changes, say
+            HELD.append(db)
+
+
+        def test_never_runs(bench):
+            pass
+        """
+    )
+    result = project.runpytest_subprocess(*CLI)
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    result.assert_outcomes(passed=2)
+    result.stdout.fnmatch_lines(
+        [
+            "*= BenchTare couldn't store results, so the run stopped =*",
+            (
+                "Storing test_bench.py::test_holds_the_database failed: results database "
+                "*results.sqlite3 is busy: another program held it for more than 0.2 s"
+            ),
+            (
+                "  Check: close whatever holds it, such as a database browser with unsaved "
+                "changes or another BenchTare run upgrading it, and run again; or point "
+                "--results at another file, or run with --no-results"
+            ),
+            "Run *: 1 test stored before this. It stays marked running.",
+            "*BenchTare couldn't store results, so the run stopped. What failed is listed above*",
+        ]
+    )
+    result.stdout.no_fnmatch_line("*INTERNALERROR*")
+    result.stdout.no_fnmatch_line("*PluggyTeardownRaisedWarning*")
+    assert query(project, "SELECT status FROM runs") == [("running",)]
+    assert query(project, "SELECT nodeid FROM test_results") == [("test_bench.py::test_first",)]
+
+
+def test_a_database_held_when_the_run_starts_stops_it_before_any_test(project, monkeypatch):
+    project.runpytest(*CLI)
+    monkeypatch.setattr(schema, "BUSY_TIMEOUT_MS", 100)
+    other = sqlite3.connect(project.path / ".benchtare" / "results.sqlite3", isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")
+    try:
+        result = project.runpytest(*CLI)
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines(
+        [
+            "*BenchTare can't store results.*",
+            "*results database *results.sqlite3 is busy: another program held it for more than 0.1 s",
+        ]
+    )
+    assert query(project, "SELECT count(*) FROM runs") == [(1,)]
+
+
+def test_a_failure_while_the_bench_opens_is_about_results_not_the_bench(project, monkeypatch):
+    monkeypatch.setattr(SQLiteStore, "add_equipment", disk_full)
+    result = project.runpytest(*CLI)
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    result.stdout.fnmatch_lines(
+        [
+            "*= BenchTare couldn't store results, so the run stopped =*",
+            (
+                "Storing the bench equipment failed: results database *results.sqlite3 couldn't "
+                "be written: database or disk is full"
+            ),
+            (
+                "  Check: that the disk isn't full and the file and its folder can be written; "
+                "or point --results at another file, or run with --no-results"
+            ),
+            "Run *: 0 tests stored before this. It stays marked running.",
+        ]
+    )
+    result.stdout.no_fnmatch_line("*couldn't open the bench*")
+    result.stdout.no_fnmatch_line("*self-test passed*")  # it stopped there, before the self-test
+    assert query(project, "SELECT status FROM runs") == [("running",)]
+    assert query(project, "SELECT count(*) FROM test_results") == [(0,)]
+
+
+def test_results_that_cant_be_stored_at_the_end_fail_the_run(project, monkeypatch):
+    monkeypatch.setattr(SQLiteStore, "finish_run", disk_full)
+    result = project.runpytest(*CLI)
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    result.assert_outcomes(passed=1, failed=1)  # every test ran
+    result.stdout.fnmatch_lines(
+        [
+            "*= BenchTare couldn't store results =*",
+            "Storing the end of the run failed: results database *couldn't be written: database*",
+            "  Check: that the disk isn't full*",
+            "Run *: 2 tests stored before this. It stays marked running.",
+        ]
+    )
+    assert query(project, "SELECT status FROM runs") == [("running",)]
+    assert query(project, "SELECT count(*) FROM test_results") == [(2,)]
+
+
+def test_a_selftest_whose_results_cant_be_stored_does_not_pass(project, monkeypatch):
+    monkeypatch.setattr(SQLiteStore, "add_selftest", disk_full)
+    result = project.runpytest(*CLI, "--selftest-only")
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    result.stdout.fnmatch_lines(["Storing the self-test failed: results database *"])
 
 
 # --- DUT identity ----------------------------------------------------------------------------------

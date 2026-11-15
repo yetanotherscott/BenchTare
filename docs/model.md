@@ -496,8 +496,9 @@ PASSED  DUT sends Mode: Mode = 'standby' on can0
 test. It runs through pytest (`pytest --selftest-only`), so it finds the three
 files exactly as a test run does: from `--dut`, `--bench` and `--harness`, or
 from the ini file. Other options go to pytest. It lists every check, and exits
-0 when the self-test passed, 1 when it failed, and 4 when it couldn't start
-(BenchTare isn't configured, or a file is wrong).
+0 when the self-test passed, 1 when it failed, 2 when its results couldn't be
+stored, and 4 when it couldn't start (BenchTare isn't configured, or a file is
+wrong).
 
 ### The test check (on demand)
 
@@ -537,14 +538,24 @@ Each run stores:
 
 | Option | Ini setting | What it does |
 | --- | --- | --- |
-| `--results PATH` | `benchtare_results` | Where the database is. Default `.benchtare/results.sqlite3` under pytest's rootdir |
+| `--results PATH` | `benchtare_results` | Where the database is. Default `.benchtare/results.sqlite3` under pytest's rootdir. A relative `--results` is from where pytest runs, and a relative `benchtare_results` from the ini file's folder. Missing folders are made |
 | `--no-results` | | Don't store this run, for throwaway runs while writing tests |
 | `--identify NAME=VALUE` | | Part of the DUT's identity, such as `hardware_revision=C`; repeatable |
 
 A run is written as it goes, so a run that crashed still has every test that
-finished, and is marked `running`. A database written by a newer BenchTare is
-refused, and nothing is written to it. An older one is backed up and upgraded.
-Runs that only collect tests (`--collect-only`) aren't stored.
+finished, and is marked `running`. A later run only adds rows: it never changes
+or removes an earlier run's. Two runs can share one file at the same time. A
+database written by a newer BenchTare is refused, and nothing is written to it.
+An older one is backed up and upgraded. A file that isn't a BenchTare database
+is refused and left as it was. Runs that only collect tests (`--collect-only`)
+aren't stored. Keep the database on a local disk, not a network drive: SQLite
+can't safely share a file between machines.
+
+If the database can't be written during a run (another program holds it for
+more than five seconds, or the disk is full), the run stops with a message
+saying which file, what was being stored and what to check, and exits with
+code 2. A run whose results aren't kept doesn't pass, so this happens even
+when every test passed.
 
 The manifest makes a run reproducible. It shows which DUT description, bench
 and harness a result came from, and whether anything has changed since. Each

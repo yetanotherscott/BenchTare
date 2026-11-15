@@ -3,6 +3,8 @@ written. The plugin's side is in test_results_plugin.py."""
 
 import json
 import sqlite3
+import subprocess
+import sys
 import time
 
 import pytest
@@ -10,8 +12,10 @@ import pytest
 from benchtare.dut.identity import IdentityValue
 from benchtare.record import RecordEntry, RecordLevel
 from benchtare.results import schema
+from benchtare.results.manifest import ManifestFile
 from benchtare.results.schema import SCHEMA_VERSION, ResultsError, open_database
 from benchtare.results.store import RunInfo, SQLiteStore, TestResult, utc
+from benchtare.selftest import CheckResult, SelfTestResult
 
 TABLES = {
     "meta",
@@ -84,7 +88,139 @@ def test_reopening_keeps_what_was_stored(path):
     store.close()
 
 
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("several", "folders", "that", "don't", "exist", "results.sqlite3"),
+        ("bench results ü", "résultats 1.sqlite3"),
+    ],
+    ids=["new-folders", "spaces-and-accents"],
+)
+def test_a_database_can_be_in_any_folder_and_its_folders_are_made(tmp_path, parts):
+    path = tmp_path.joinpath(*parts)
+    store = SQLiteStore(path)
+    store.start_run(run_info())
+    store.close()
+    store = SQLiteStore(path)
+    assert store.db.execute("SELECT id FROM runs").fetchall() == [("run-1",)]
+    store.close()
+
+
+def test_a_folder_that_cant_be_made_is_refused_with_its_path(tmp_path):
+    blocker = tmp_path / "results"
+    blocker.write_text("a file where a folder should be")
+    path = blocker / "results.sqlite3"
+    with pytest.raises(ResultsError) as info:
+        open_database(path)
+    assert str(path) in str(info.value)
+    assert "Check: point --results at another file, or run with --no-results" in str(info.value)
+    assert blocker.read_text() == "a file where a folder should be"
+
+
+def store_a_whole_run(store, run_id, *, finish=True):
+    """A run that writes to every table, as a pytest session does."""
+    now = time.time()
+    store.start_run(run_info(run_id, git_commit="0123abc", git_dirty=False))
+    store.add_environment(
+        run_id,
+        {
+            "host": "bench-1",
+            "os": "Linux",
+            "python_implementation": "CPython",
+            "python_version": "3.12.1",
+        },
+        [("cantools", "40.0"), ("pytest", "9.0")],
+    )
+    store.add_manifest_files(run_id, [ManifestFile("test_x.py", "test", "0" * 64, 10)])
+    store.add_equipment(
+        run_id,
+        [
+            {
+                "equipment": "io",
+                "backend": "sim",
+                "kind": "channels",
+                "simulated": True,
+                "driver": "benchtare sim",
+                "details": {"channels": 5},
+            }
+        ],
+    )
+    check = CheckResult("loopback", "loopback io.out4 -> io.in4", "passed", "read back True")
+    store.add_selftest(run_id, SelfTestResult((check,), now, 0.2))
+    write = {"signal": "io.out4", "value": True}
+    store.add_record(
+        run_id, [RecordEntry("write", RecordLevel.STIMULI, "w", write)], phase="pretest"
+    )
+    store.add_test(run_id, TestResult(1, "t.py::a", "t.py", "failed", now, message="assert 1 == 2"))
+    read = {"signal": "Measured", "value": 42.0, "unit": "degC"}
+    store.add_record(
+        run_id, [RecordEntry("read", RecordLevel.RESULTS, "r", read)], phase="call", test_seq=1
+    )
+    store.add_identity(run_id, [IdentityValue("software", "102", "signal", True, now)])
+    if finish:
+        store.finish_run(run_id, status="finished", exit_code=1, counts={"failed": 1})
+
+
+def test_later_runs_add_rows_and_leave_every_earlier_row_as_it_was(path, database_rows):
+    store = SQLiteStore(path)
+    store_a_whole_run(store, "run-1")
+    store.close()
+    before = database_rows(path)
+    assert all(before.values()), "every table should hold a row of run-1"
+    for run_id, finish in (("run-2", True), ("run-3", False)):
+        store = SQLiteStore(path)  # each run opens the file afresh, as each session does
+        store_a_whole_run(store, run_id, finish=finish)
+        store.close()
+    after = database_rows(path)
+    for table, rows in before.items():
+        assert not rows - after[table], f"rows of {table} were changed or removed"
+    for table, rows in after.items():
+        added = rows - before[table]
+        if table == "meta":
+            assert not added
+        else:  # the run's ID is the first column of every other table
+            assert {row[0] for row in added} == {"run-2", "run-3"}, table
+
+
+def test_a_run_id_already_stored_is_refused_not_overwritten(store):
+    store.start_run(run_info("run-1", dut="first"))
+    with pytest.raises(ResultsError, match="UNIQUE constraint failed"):
+        store.start_run(run_info("run-1", dut="second"))
+    assert store.db.execute("SELECT dut FROM runs").fetchall() == [("first",)]
+
+
 # --- refusing what can't be used -------------------------------------------------------------------
+
+
+def text_file(path):
+    path.write_text("not a database")
+
+
+def sqlite_file_of_another_program(path):
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE invoices (id INTEGER)")
+    db.commit()
+    db.close()
+
+
+def newer_results_database(path):
+    open_database(path).close()
+    db = sqlite3.connect(path)
+    db.execute("PRAGMA user_version = 99")
+    db.close()
+
+
+@pytest.mark.parametrize(
+    "make", [text_file, sqlite_file_of_another_program, newer_results_database]
+)
+def test_a_refused_file_is_left_exactly_as_it_was(path, make):
+    path.parent.mkdir()
+    make(path)
+    before = path.read_bytes()
+    with pytest.raises(ResultsError):
+        open_database(path)
+    assert path.read_bytes() == before
+    assert [p.name for p in path.parent.iterdir()] == [path.name]  # no journal or WAL left
 
 
 def test_a_newer_database_is_refused_and_left_alone(path):
@@ -168,6 +304,178 @@ def test_a_failed_migration_leaves_the_database_unchanged(path, monkeypatch):
     assert db.execute("PRAGMA user_version").fetchone()[0] == 1
     assert "notes" not in tables(db)
     db.close()
+
+
+def test_a_database_another_program_holds_says_so(path, monkeypatch):
+    open_database(path).close()
+    monkeypatch.setattr(schema, "BUSY_TIMEOUT_MS", 100)
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", 2)  # so opening it needs the write lock
+    monkeypatch.setattr(schema, "MIGRATIONS", {1: add_notes_table})
+    other = sqlite3.connect(path, isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")  # a database browser with unsaved changes, say
+    try:
+        with pytest.raises(ResultsError) as info:
+            schema.open_database(path)
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+    message = str(info.value)
+    assert f"results database {path} is busy: another program held it for more than 0.1 s" in (
+        message
+    )
+    assert (
+        "Check: close whatever holds it, such as a database browser with unsaved changes or "
+        "another BenchTare run upgrading it, and run again; or point --results" in message
+    )
+    db = sqlite3.connect(path)
+    assert schema.schema_version(db) == 1  # not upgraded
+    db.close()
+
+
+# --- writes that fail -------------------------------------------------------------------------------
+
+
+def test_a_write_that_fails_says_which_database_and_what_to_check(store):
+    store.db.execute("PRAGMA query_only = ON")  # as if the file had become read-only
+    with pytest.raises(ResultsError) as info:
+        store.start_run(run_info())
+    assert info.value.message == (
+        f"results database {store.path} couldn't be written: attempt to write a readonly database"
+    )
+    assert info.value.hint == (
+        "that the disk isn't full and the file and its folder can be written; or point --results "
+        "at another file, or run with --no-results"
+    )
+
+
+def test_a_write_while_another_program_holds_the_database_says_so(path, monkeypatch):
+    monkeypatch.setattr(schema, "BUSY_TIMEOUT_MS", 100)
+    store = SQLiteStore(path)
+    other = sqlite3.connect(path, isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(ResultsError, match=r"is busy: another program held it for more than"):
+            store.start_run(run_info())
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+    store.start_run(run_info())  # once it's let go, writing works again
+    assert store.db.execute("SELECT id FROM runs").fetchall() == [("run-1",)]
+    store.close()
+
+
+def test_a_failure_sqlite_already_rolled_back_is_not_hidden(path):
+    db = open_database(path)
+    with pytest.raises(ValueError, match="the real failure"), schema.transaction(db):
+        db.execute("ROLLBACK")  # SQLite does this itself for a full disk, say
+        raise ValueError("the real failure")
+    db.close()
+
+
+# --- runs at the same time ---------------------------------------------------------------------------
+
+TESTS_PER_RUN = 5
+
+# One process storing whole runs, as one pytest session does. Each worker waits until every
+# worker is ready, so they open the database at the same moment.
+WORKER = """
+import sys
+import time
+from pathlib import Path
+
+from benchtare.record import RecordEntry, RecordLevel
+from benchtare.results import schema
+from benchtare.results.store import RunInfo, SQLiteStore, TestResult
+
+path, ready, name, runs, workers, upgrade = sys.argv[1:]
+ready = Path(ready)
+
+if upgrade == "upgrade":  # this BenchTare is a version newer, with an upgrade that takes time
+
+    def add_notes(db):
+        time.sleep(0.2)
+        db.execute("CREATE TABLE notes (run_id TEXT, note TEXT)")
+
+    schema.SCHEMA_VERSION = 2
+    schema.MIGRATIONS = {1: add_notes}
+
+(ready / name).touch()
+deadline = time.monotonic() + 60
+while len(list(ready.iterdir())) < int(workers):
+    if time.monotonic() > deadline:
+        sys.exit("the other workers never started")
+    time.sleep(0.001)
+
+for n in range(int(runs)):
+    run_id = f"{name}-{n}"
+    store = SQLiteStore(Path(path))
+    store.start_run(
+        RunInfo(run_id, "tests", time.time(), "stimuli", "d", "b", "h", None, "0", "0", [])
+    )
+    for seq in range(1, TESTS + 1):
+        entry = RecordEntry("read", RecordLevel.RESULTS, "r", {"signal": "X", "value": seq})
+        store.add_record(run_id, [entry], phase="call", test_seq=seq)
+        store.add_test(run_id, TestResult(seq, f"t.py::test_{seq}", "t.py", "passed", time.time()))
+    store.finish_run(run_id, status="finished", exit_code=0, counts={"passed": TESTS})
+    store.close()
+""".replace("TESTS", str(TESTS_PER_RUN))
+
+
+def run_together(tmp_path, path, *, workers=4, runs=1, upgrade=False):
+    """Start ``workers`` processes on one database at once; return each one's (exit, stderr)."""
+    script = tmp_path / "worker.py"
+    script.write_text(WORKER, encoding="utf-8")
+    ready = tmp_path / "ready"
+    ready.mkdir()
+    started = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(script),
+                str(path),
+                str(ready),
+                f"w{i}",
+                str(runs),
+                str(workers),
+                "upgrade" if upgrade else "same",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        for i in range(workers)
+    ]
+    return [(proc.wait(timeout=120), proc.communicate()[1]) for proc in started]
+
+
+def test_runs_starting_together_on_a_new_database_are_all_stored(tmp_path, path):
+    assert run_together(tmp_path, path, runs=5) == [(0, "")] * 4
+    db = sqlite3.connect(path)
+    assert db.execute("SELECT count(*), sum(status = 'finished') FROM runs").fetchone() == (20, 20)
+    assert db.execute("SELECT count(*) FROM test_results").fetchone() == (20 * TESTS_PER_RUN,)
+    per_run = db.execute(
+        "SELECT count(*), min(seq), max(seq) FROM record_entries GROUP BY run_id"
+    ).fetchall()
+    assert per_run == [(TESTS_PER_RUN, 1, TESTS_PER_RUN)] * 20
+    db.close()
+
+
+def test_runs_upgrading_an_older_database_together_upgrade_it_once(tmp_path, path):
+    store = SQLiteStore(path)
+    store.start_run(run_info())
+    store.close()
+    assert run_together(tmp_path, path, upgrade=True) == [(0, "")] * 4
+    db = sqlite3.connect(path)
+    assert schema.schema_version(db) == 2
+    assert "notes" in tables(db)
+    assert db.execute("SELECT count(*) FROM runs").fetchone() == (5,)  # run-1 kept, plus 4
+    db.close()
+    backup = sqlite3.connect(path.with_name("results.sqlite3.v1.bak"))
+    assert schema.schema_version(backup) == 1  # the file as it was before the upgrade
+    assert backup.execute("SELECT id FROM runs").fetchall() == [("run-1",)]
+    backup.close()
 
 
 # --- writing a run ---------------------------------------------------------------------------------

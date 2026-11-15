@@ -1,5 +1,7 @@
+import sqlite3
 import textwrap
 import time
+from collections import Counter
 
 import can
 import pytest
@@ -63,6 +65,26 @@ def mux_bench(tmp_path):
             yield bench, send
         finally:
             bus.shutdown()
+
+
+@pytest.fixture
+def database_rows():
+    """Every row of every table in a results database: ``{table: Counter(rows)}``. Comparing
+    two of these shows exactly which rows a later run added, changed or removed."""
+
+    def rows(path):
+        db = sqlite3.connect(path)
+        try:
+            names = [
+                row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            ]
+            return {
+                name: Counter(db.execute(f'SELECT * FROM "{name}"').fetchall()) for name in names
+            }
+        finally:
+            db.close()
+
+    return rows
 
 
 @pytest.fixture

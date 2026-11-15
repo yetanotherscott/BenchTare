@@ -2,6 +2,7 @@
 
 A run is written as it goes: ``start_run`` when the session starts, each test when it finishes,
 ``finish_run`` at the end. A run that crashed stays ``running``, with every test that finished.
+A write that fails raises ``ResultsError``, saying which file and what to check.
 Rows are written from pytest's main thread only.
 
 See docs/results-schema.md for the tables.
@@ -12,7 +13,9 @@ from __future__ import annotations
 import json
 import math
 import numbers
-from collections.abc import Mapping, Sequence
+import sqlite3
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +24,7 @@ from typing import Any, Protocol
 from benchtare.dut.identity import IdentityValue
 from benchtare.record import RecordEntry
 from benchtare.results.manifest import ManifestFile
-from benchtare.results.schema import SCHEMA_VERSION, open_database, transaction
+from benchtare.results.schema import SCHEMA_VERSION, open_database, transaction, write_failed
 from benchtare.selftest import SelfTestResult
 
 RUNNING = "running"
@@ -113,7 +116,7 @@ class SQLiteStore:
         self._identity_seq: dict[tuple[str, str], int] = {}
 
     def start_run(self, run: RunInfo) -> None:
-        with transaction(self.db):
+        with self._write():
             self.db.execute(
                 """INSERT INTO runs (id, kind, status, started_at, schema_version, record_level,
                     dut, bench, harness, simulated_dut, benchtare_version, pytest_version, args,
@@ -157,7 +160,7 @@ class SQLiteStore:
             "timezone",
             "ci",
         )
-        with transaction(self.db):
+        with self._write():
             self.db.execute(
                 f"INSERT INTO run_environment (run_id, {', '.join(columns)}) "
                 f"VALUES (?{', ?' * len(columns)})",
@@ -169,7 +172,7 @@ class SQLiteStore:
             )
 
     def add_manifest_files(self, run_id: str, files: Sequence[ManifestFile]) -> None:
-        with transaction(self.db):
+        with self._write():
             self.db.executemany(
                 "INSERT OR IGNORE INTO manifest_files (run_id, path, role, sha256, size) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -177,7 +180,7 @@ class SQLiteStore:
             )
 
     def add_equipment(self, run_id: str, equipment: Sequence[Mapping[str, Any]]) -> None:
-        with transaction(self.db):
+        with self._write():
             self.db.executemany(
                 """INSERT OR REPLACE INTO run_equipment (run_id, equipment, backend, kind,
                     simulated, vendor, model, serial_number, firmware_version, driver,
@@ -203,7 +206,7 @@ class SQLiteStore:
             )
 
     def add_selftest(self, run_id: str, result: SelfTestResult) -> None:
-        with transaction(self.db):
+        with self._write():
             self.db.execute(
                 "INSERT INTO selftests (run_id, passed, started_at, duration) VALUES (?, ?, ?, ?)",
                 (run_id, int(result.passed), utc(result.started), result.duration),
@@ -218,7 +221,7 @@ class SQLiteStore:
             )
 
     def add_test(self, run_id: str, result: TestResult) -> None:
-        with transaction(self.db):
+        with self._write():
             self.db.execute(
                 """INSERT INTO test_results (run_id, seq, nodeid, file, outcome, message, details,
                     started_at, setup_duration, call_duration, teardown_duration, properties)
@@ -251,7 +254,7 @@ class SQLiteStore:
             return
         first = self._next_entry.get(run_id, 1)
         rows = [_entry_row(run_id, first + i, test_seq, phase, e) for i, e in enumerate(entries)]
-        with transaction(self.db):
+        with self._write():
             self.db.executemany(
                 """INSERT INTO record_entries (run_id, seq, test_seq, phase, at, kind, level,
                     text, signal, endpoint, unit, value, value_num, data)
@@ -278,7 +281,7 @@ class SQLiteStore:
             )
         if not rows:
             return
-        with transaction(self.db):
+        with self._write():
             self.db.executemany(
                 """INSERT INTO run_dut_identity (run_id, name, seq, expected, value, source, at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -288,7 +291,7 @@ class SQLiteStore:
     def finish_run(
         self, run_id: str, *, status: str, exit_code: int, counts: Mapping[str, int]
     ) -> None:
-        with transaction(self.db):
+        with self._write():
             self.db.execute(
                 """UPDATE runs SET status = ?, finished_at = ?, exit_code = ?, tests_passed = ?,
                     tests_failed = ?, tests_errors = ?, tests_skipped = ?
@@ -307,6 +310,16 @@ class SQLiteStore:
 
     def close(self) -> None:
         self.db.close()
+
+    @contextmanager
+    def _write(self) -> Iterator[None]:
+        """One write, all or nothing. Raise ``ResultsError`` saying which file and what to
+        check if it can't be written: busy for too long, a full disk, a read-only file."""
+        try:
+            with transaction(self.db):
+                yield
+        except sqlite3.Error as exc:
+            raise write_failed(self.path, exc) from None
 
 
 def utc(at: float | None) -> str:

@@ -40,7 +40,8 @@ Results: every run is stored in the results database (``benchtare.results``), at
 ``.benchtare/results.sqlite3`` under pytest's rootdir unless ``--results`` or
 ``benchtare_results`` says otherwise, and not at all with ``--no-results``. A run is written as
 it goes: when it starts, before the first test (manifest, equipment, self-test, DUT identity),
-after each test, and when it ends. ``--identify NAME=VALUE`` adds to the DUT's identity.
+after each test, and when it ends. A write that fails stops the run with exit code 2 and a message
+saying which file and what to check. ``--identify NAME=VALUE`` adds to the DUT's identity.
 """
 
 from __future__ import annotations
@@ -378,40 +379,101 @@ class BenchSession:
         self._counts: Counter[str] = Counter()
         self._identity_stored = 0  # how many of the bench's identity values are stored
         self._manifest_stored = False
+        self._tests_stored = 0
+        self._config: pytest.Config | None = None
+        # Set when a write to the results database failed: (what was being stored, why).
+        self.results_failure: tuple[str, ResultsError] | None = None
+        self._results_failure_shown = False
 
     # --- the run in the results database --------------------------------------------------
 
     def start_run(self, config: pytest.Config) -> None:
         """Open the results database and store the run's start. Called at session start."""
+        self._config = config
         if self.results_path is None:
             return
         try:
             self.store = SQLiteStore(self.results_path)
         except ResultsError as exc:
             raise pytest.UsageError(f"BenchTare can't store results.\n{exc}") from None
-        self.run_id = str(uuid.uuid4())
+        run_id = str(uuid.uuid4())
         commit, dirty = git_state(config.rootpath)
-        self.store.start_run(
-            RunInfo(
-                id=self.run_id,
-                kind="selftest" if self.selftest_only else "tests",
-                started_at=self._started,
-                record_level=self.level.label,
-                dut=self.description.name,
-                bench=self.bench_config.name,
-                harness=self.harness.name,
-                simulated_dut=self.harness.simulate,
-                benchtare_version=__version__,
-                pytest_version=pytest.__version__,
-                args=[str(arg) for arg in config.invocation_params.args],
-                git_commit=commit,
-                git_dirty=dirty,
-            )
+        run = RunInfo(
+            id=run_id,
+            kind="selftest" if self.selftest_only else "tests",
+            started_at=self._started,
+            record_level=self.level.label,
+            dut=self.description.name,
+            bench=self.bench_config.name,
+            harness=self.harness.name,
+            simulated_dut=self.harness.simulate,
+            benchtare_version=__version__,
+            pytest_version=pytest.__version__,
+            args=[str(arg) for arg in config.invocation_params.args],
+            git_commit=commit,
+            git_dirty=dirty,
         )
-        self.store.add_environment(self.run_id, environment(), packages())
+        try:
+            self.store.start_run(run)
+            self.store.add_environment(run_id, environment(), packages())
+        except ResultsError as exc:
+            self.store.close()
+            self.store = None
+            raise pytest.UsageError(f"BenchTare can't store results.\n{exc}") from None
+        self.run_id = run_id
+
+    def _store(
+        self, what: str, write: Callable[[SQLiteStore, str], None], *, stop: bool = True
+    ) -> bool:
+        """Write ``what`` to the results database; False if this run isn't stored.
+
+        If the write fails, nothing more is stored, and with ``stop`` the run stops here: a run
+        whose results can't be kept shouldn't go on. What was stored before stays, and the run
+        stays marked running, like a run that crashed. Without ``stop``, the caller stops the
+        run later (``pytest_runtest_logfinish``), or, at the end of the run when every test has
+        run, the failure is shown in the summary and the exit code is 2.
+        """
+        if self.store is None or self.run_id is None:
+            return False
+        try:
+            write(self.store, self.run_id)
+        except ResultsError as exc:
+            self.results_failure = (what, exc)
+            self.store.close()
+            self.store = None
+            if stop:
+                self._stop_run()
+            return False
+        return True
+
+    def _stop_run(self) -> None:
+        """Stop the run, because its results can't be stored."""
+        self._show_results_failure(stopped=True)
+        pytest.exit(
+            "BenchTare couldn't store results, so the run stopped. What failed is listed above.",
+            returncode=pytest.ExitCode.INTERRUPTED,
+        )
+
+    def _show_results_failure(self, *, stopped: bool) -> None:
+        if self.results_failure is None or self._config is None:
+            return
+        reporter = self._config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is None:
+            return
+        self._results_failure_shown = True
+        what, exc = self.results_failure
+        title = "BenchTare couldn't store results" + (", so the run stopped" if stopped else "")
+        reporter.write_sep("=", title, red=True)
+        reporter.write_line(f"Storing {what} failed: {exc.message}", red=True)
+        if exc.hint:
+            reporter.write_line(f"  Check: {exc.hint}")
+        tests = f"{self._tests_stored} test{'' if self._tests_stored == 1 else 's'}"
+        reporter.write_line(
+            f"Run {self.run_id}: {tests} stored before this. It stays marked running."
+        )
 
     def _store_manifest(self, session: pytest.Session) -> None:
-        if self.store is None or self.run_id is None or self._manifest_stored:
+        if self.store is None or self._manifest_stored:
             return
         self._manifest_stored = True
         config = session.config
@@ -422,51 +484,57 @@ class BenchSession:
             files.append((Path(config.inipath), INI))
         files += [(path, CONFTEST) for path in _conftest_files(config)]
         files += [(Path(item.path), TEST) for item in session.items]
-        self.store.add_manifest_files(self.run_id, manifest_files(config.rootpath, files))
+        manifest = manifest_files(config.rootpath, files)
+        self._store("the manifest", lambda store, run: store.add_manifest_files(run, manifest))
 
-    def _store_identity(self) -> None:
+    def _store_identity(self, *, stop: bool = True) -> None:
         """Store the identity values collected since last time."""
-        if self.store is None or self.run_id is None or self.bench is None:
+        if self.bench is None:
             return
         values = self.bench.identity_values()
-        self.store.add_identity(self.run_id, values[self._identity_stored :])
-        self._identity_stored = len(values)
+        new = values[self._identity_stored :]
+        if self._store(
+            "the DUT identity", lambda store, run: store.add_identity(run, new), stop=stop
+        ):
+            self._identity_stored = len(values)
 
-    def _store_test(self, item: pytest.Item) -> None:
+    def _store_test(self, item: pytest.Item, *, stop: bool = True) -> None:
         reports = item.stash.get(_REPORTS, {})
         outcome, main = _outcome(reports)
         self._counts[_COUNTED_AS[outcome]] += 1
-        if self.store is None or self.run_id is None:
+        if self.store is None:
             return
         self._test_seq += 1
+        seq = self._test_seq
         details = main.longreprtext if main is not None and not main.passed else ""
         teardown = reports.get("teardown")
         if teardown is not None and teardown.failed and teardown is not main:
             details += f"\n\nTeardown also failed:\n{teardown.longreprtext}"
         last = teardown or main
-        self.store.add_test(
-            self.run_id,
-            TestResult(
-                seq=self._test_seq,
-                nodeid=item.nodeid,
-                file=shown_path(Path(item.path), item.config.rootpath),
-                outcome=outcome,
-                started_at=item.stash.get(_STARTED, time.time()),
-                message=_short_message(main) if main is not None else None,
-                details=details.strip() or None,
-                durations={when: report.duration for when, report in reports.items()},
-                properties=list(last.user_properties) if last is not None else [],
-            ),
+        result = TestResult(
+            seq=seq,
+            nodeid=item.nodeid,
+            file=shown_path(Path(item.path), item.config.rootpath),
+            outcome=outcome,
+            started_at=item.stash.get(_STARTED, time.time()),
+            message=_short_message(main) if main is not None else None,
+            details=details.strip() or None,
+            durations={when: report.duration for when, report in reports.items()},
+            properties=list(last.user_properties) if last is not None else [],
         )
         with self._lock:
             records = {
                 phase: list(entries) for phase, entries in item.stash.get(_RECORD, {}).items()
             }
-        for phase in PHASES:
-            self.store.add_record(
-                self.run_id, records.get(phase, []), phase=phase, test_seq=self._test_seq
-            )
-        self._store_identity()
+
+        def write(store: SQLiteStore, run: str) -> None:
+            store.add_test(run, result)
+            for phase in PHASES:
+                store.add_record(run, records.get(phase, []), phase=phase, test_seq=seq)
+
+        if self._store(item.nodeid, write, stop=stop):
+            self._tests_stored += 1
+        self._store_identity(stop=stop)
 
     # --- the bench --------------------------------------------------------------------------
 
@@ -491,8 +559,10 @@ class BenchSession:
             bench.recorder = self._record
             bench.open()
             self.bench = bench
-            if self.store is not None and self.run_id is not None:
-                self.store.add_equipment(self.run_id, bench.equipment())
+            equipment = bench.equipment() if self.store is not None else []
+            self._store(
+                "the bench equipment", lambda store, run: store.add_equipment(run, equipment)
+            )
             for name, value in self._identify:
                 bench.collect_identity(name, value, COMMAND_LINE)
         return self.bench
@@ -531,10 +601,13 @@ class BenchSession:
             _write(config, f"benchtare DUT identity: {shown}")
         unexpected = [entry for entry in self.pretest_record if entry.unexpected]
         _warn_unexpected(self._warn_at_description, "before the first test", unexpected)
-        if self.store is not None and self.run_id is not None:
-            self.store.add_selftest(self.run_id, result)
-            self.store.add_record(self.run_id, self.pretest_record, phase="pretest")
-            self._store_identity()
+
+        def write(store: SQLiteStore, run: str) -> None:
+            store.add_selftest(run, result)
+            store.add_record(run, self.pretest_record, phase="pretest")
+
+        self._store("the self-test", write)
+        self._store_identity()
         return result
 
     def _warn_at_description(self, warning: Warning) -> None:
@@ -563,10 +636,13 @@ class BenchSession:
                 for name, note in missing.items():
                     warning = DutIdentityWarning(_missing_text(name, note, bench.identity))
                     self._warn_at_description(warning)
-        if self.store is not None and self.run_id is not None:
-            self._store_identity()
-            gone = [IdentityValue(name, None, MISSING, True, None) for name in missing]
-            self.store.add_identity(self.run_id, [*given, *gone])
+        self._store_identity(stop=False)
+        gone = [IdentityValue(name, None, MISSING, True, None) for name in missing]
+        self._store(
+            "the DUT identity",
+            lambda store, run: store.add_identity(run, [*given, *gone]),
+            stop=False,
+        )
 
     # --- hooks ----------------------------------------------------------------------------
 
@@ -690,7 +766,13 @@ class BenchSession:
             if any(entry.kind != RESULT for entry in entries):
                 report.sections.append((f"BenchTare record {phase}", render(entries)))
         if call.when == "teardown":
-            self._store_test(item)
+            # A hook wrapper shouldn't raise, so a test that couldn't be stored stops the run in
+            # pytest_runtest_logfinish, as soon as pytest has reported the test.
+            self._store_test(item, stop=False)
+
+    def pytest_runtest_logfinish(self) -> None:
+        if self.results_failure is not None:
+            self._stop_run()
 
     def pytest_sessionfinish(self, session: pytest.Session) -> None:
         if self.bench is not None:
@@ -705,22 +787,29 @@ class BenchSession:
             session.exitstatus = pytest.ExitCode.OK if ok else pytest.ExitCode.TESTS_FAILED
         stopped = session.exitstatus == pytest.ExitCode.INTERRUPTED
         self._finish_identity(stopped)
-        if self.store is not None and self.run_id is not None:
-            self.store.add_record(self.run_id, self._after_last_test, phase="after-last-test")
-            self.store.finish_run(
-                self.run_id,
-                status=STOPPED if stopped else FINISHED,
-                exit_code=int(session.exitstatus),
-                counts=self._counts,
+        status = STOPPED if stopped else FINISHED
+
+        def write(store: SQLiteStore, run: str) -> None:
+            store.add_record(run, self._after_last_test, phase="after-last-test")
+            store.finish_run(
+                run, status=status, exit_code=int(session.exitstatus), counts=self._counts
             )
+
+        self._store("the end of the run", write, stop=False)
+        if self.store is not None:
             self.store.close()
             self.store = None
+        if self.results_failure is not None:
+            # Results that couldn't be stored fail the run, even when every test passed.
+            session.exitstatus = pytest.ExitCode.INTERRUPTED
         self.bench = None
 
     def pytest_terminal_summary(self, terminalreporter: Any) -> None:
         if self._after_last_test:
             terminalreporter.write_sep("-", "BenchTare record after the last test")
             terminalreporter.write_line(render(self._after_last_test))
+        if self.results_failure is not None and not self._results_failure_shown:
+            self._show_results_failure(stopped=False)
 
 
 def _write(config: pytest.Config, line: str, **markup: bool) -> None:
