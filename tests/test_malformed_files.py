@@ -157,7 +157,8 @@ def test_wrong_kind_of_file_is_named(kind, other, tmp_path):
 def test_directory_instead_of_file(kind, tmp_path):
     folder = tmp_path / "folder.yaml"
     folder.mkdir()
-    with pytest.raises(ConfigError, match="can't read the file"):
+    # Said the same way on every OS; the OS's own error for this differs.
+    with pytest.raises(ConfigError, match=f"this is a folder, not {KIND_NAMES[kind]}"):
         LOADERS[kind](folder)
 
 

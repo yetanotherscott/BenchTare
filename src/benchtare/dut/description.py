@@ -319,6 +319,15 @@ def _load_can(
 
 
 def _load_dbc(dbc_path: Path, raw: str, problems: list[Problem]) -> Any:
+    if dbc_path.is_dir():
+        problems.append(
+            Problem(
+                f"DBC file '{raw}' is a folder, not a file",
+                where="can: dbc",
+                hint=f"it resolved to {dbc_path.resolve()}",
+            )
+        )
+        return None
     try:
         return cantools.database.load_file(str(dbc_path), database_format="dbc")
     except FileNotFoundError:

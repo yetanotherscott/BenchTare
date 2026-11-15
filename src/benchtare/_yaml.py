@@ -70,6 +70,13 @@ def read_mapping(path: Path, *, kind: str) -> dict[Any, Any]:
 
     if path.suffix.lower() == ".dbc":
         raise not_a_dbc()
+    if path.is_dir():
+        raise fail(
+            Problem(
+                f"this is a folder, not {a(kind)}",
+                hint=f"give {a(kind)} here; the path resolved to {path.resolve()}",
+            )
+        )
 
     try:
         raw = path.read_bytes()

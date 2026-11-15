@@ -480,7 +480,7 @@ def test_error_message_names_file_signal_and_what_to_check(write):
 def test_dbc_path_that_is_a_directory(write, tmp_path):
     (tmp_path / "folder.dbc").mkdir()
     path = write("dut.yaml", "dut: x\ncan: {node: REFDEV, dbc: folder.dbc}\n")
-    with pytest.raises(ConfigError, match="can't read DBC file 'folder.dbc': Is a directory"):
+    with pytest.raises(ConfigError, match="DBC file 'folder.dbc' is a folder, not a file"):
         load_interface_description(path)
 
 
