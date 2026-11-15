@@ -1,19 +1,23 @@
 # BenchTare
 
 BenchTare is an open-source, self-verifying HIL/SIL test framework for
-embedded systems, built on pytest. A team describes its device's interfaces
-and its bench, then writes plain pytest tests against named signals. The bench
-checks itself before every run, and every run is recorded with a manifest.
+embedded systems, built on pytest. A team describes its device (the DUT), its
+bench and the harness between them, then writes plain pytest tests against
+named signals. The bench and harness check themselves before every run, and
+every run is recorded with a manifest.
 
 Read these before making design decisions:
 
+- `docs/model.md`: what BenchTare models and what each file is for. This is
+  the reference for terms and concepts.
 - `docs/design-brief.md`: goals, non-goals, architecture, prior art.
 - `docs/first-slice-plan.md`: what is being built now, and in what order.
 
 ## Current scope
 
-Work through the milestones in `docs/first-slice-plan.md` in order (M0 to M6,
-then optional M7). Finish and commit one milestone before starting the next.
+Work through the milestones in `docs/first-slice-plan.md` in order (M0 is done;
+M1 to M7, then optional M8). Finish and commit one milestone before starting
+the next.
 
 The plan has an "Out of scope for this slice" list. Do not build anything on
 it, even if the design brief describes it. If a task seems to need something
@@ -45,15 +49,21 @@ Use these names consistently in code, docs and messages.
 
 | Term | Meaning |
 | --- | --- |
-| Signal | A named value with a unit, type, range and direction. Knows nothing about buses |
-| Interface description | Where signals come from: a DBC file or a YAML signal list |
-| Bench file | YAML that picks a backend and maps signals to its channels |
-| Backend | Something that can write and read signals: simulated or hardware |
-| Transport | How a backend talks to the device: CAN now, others later as plugins |
-| Tare | The bench self-test that runs before each session |
-| Plumb | The simulated reference device and bench that ship with the package |
+| DUT | The device under test, real or simulated |
+| Signal | A named value on the DUT: name, type, unit and direction (`input` or `output`, from the DUT's point of view). No range. Knows nothing about buses |
+| Interface description | One YAML file per DUT listing its signals: inline, imported from DBC files, or both |
+| Bench | The equipment that drives and reads signals, real or simulated |
+| Bench file | YAML listing the bench's equipment, with each item's backend and channels |
+| Harness | What connects the bench to the DUT |
+| Harness file | YAML mapping each signal to a bench channel, with loopback and DUT presence checks |
+| Backend | Code that drives one kind of equipment: simulated now, hardware later |
+| Transport | How a backend reaches the DUT: CAN now, others later as plugins |
+| Staging | Putting the DUT into the state a test needs, using ordinary pytest fixtures |
+| Self-test | The bench check and harness check that run before each session |
+| Test check | The on-demand run that corrupts readings to prove each test can fail |
+| Reference | The simulated DUT, bench and harness that ship with the package |
 | Manifest | The record of what a run tested: versions and file hashes |
-| Assay | The trace report linking requirements, tests and results (M7) |
+| Trace report | The report linking requirements, tests and results (M8) |
 
 ## Conventions
 
@@ -70,6 +80,12 @@ Use these names consistently in code, docs and messages.
   migration or a version bump, never a silent change.
 - Error messages are for a tired engineer at a bench: say what failed, which
   file and signal, and what to check.
+- BenchTare never judges a signal's value. Pass criteria live in test
+  assertions, and any value a channel can carry may be written.
+- Commit messages and PR descriptions carry no Claude attribution: no
+  `Co-Authored-By` trailer and no "Generated with" line.
+- Project documents describe the project only. They never mention anyone's
+  personal circumstances or employment.
 
 ## Commands
 
@@ -88,6 +104,9 @@ Do not reopen these without being asked:
 - Requirements traceability is optional and secondary. The core value is a
   complete bench that proves its own reliability.
 - Transports and backends are plugins behind stable interfaces.
-- The reference bench is simulated and ships inside the package.
+- The reference DUT, bench and harness are simulated and ship inside the
+  package.
+- One install: python-can (LGPL-3.0, an unmodified dependency) and cantools
+  are regular dependencies, not extras.
 - Run history goes to a database: local by default, remote by configuration.
   SQLite is assumed as the local default.

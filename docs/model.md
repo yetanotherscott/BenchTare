@@ -1,0 +1,281 @@
+# The BenchTare Model
+
+This document defines what BenchTare models and what each file a team writes is
+for. Code, docs and error messages use these terms. When a design question
+comes up, this is the reference.
+
+## The parts of a system test
+
+```
+  TESTS             SIGNALS                BENCH                HARNESS              DUT
+  plain pytest  ->  named values on   ->   equipment that  ===  what connects  ===  the device
+  + staging         the DUT                drives and reads     the bench to         under test,
+  fixtures                                 signals              the DUT              real or simulated
+
+  test files,       interface              bench file           harness file
+  conftest.py       description
+```
+
+| Part | What it is | Described by |
+| --- | --- | --- |
+| **DUT** | The device under test, real or simulated | Interface description |
+| **Signal** | A named value on the DUT | Interface description |
+| **Bench** | The equipment that drives and reads signals: a CAN interface, a DAQ, relays, a power supply, or a simulation of them | Bench file |
+| **Harness** | What connects the bench to the DUT: which signal is on which bench channel | Harness file |
+| **Staging** | Getting the DUT into the state a test needs: powered, booted, in the right mode | pytest fixtures |
+| **Tests** | Stimuli written to signals, and assertions on what is read back | pytest test files |
+
+The split matters because each part changes on its own:
+
+- The same tests run on any bench and harness that can reach the DUT's signals:
+  a simulation on a laptop, a rack in the lab, a rack somewhere else.
+- One bench is reused across many DUTs. Only the harness file changes.
+- A new revision of the DUT changes its interface description, not the bench.
+
+## Signals
+
+A signal has four properties:
+
+| Property | Meaning |
+| --- | --- |
+| Name | Unique within the DUT. Tests refer to signals by name |
+| Type | `float`, `int`, `bool` or `enum` (with its list of values) |
+| Unit | For example `V`, `degC`, `rpm`. Optional for `bool` and `enum` |
+| Direction | From the DUT's point of view: `input` (the bench drives it) or `output` (the bench reads it) |
+
+A signal has no valid range. What counts as a correct value is decided by a
+test's assertions, not by the signal. BenchTare never refuses to send a value
+because of what it is: testing how a DUT handles a bad input means sending the
+bad input. A write fails only if the channel physically cannot carry the value,
+for example a value too wide for its bits in a CAN frame.
+
+A signal knows nothing about buses or channels. That's the harness's job.
+
+## The interface description
+
+One YAML file per DUT lists every signal the DUT exposes. Signals can be listed
+directly, imported from DBC files, or both.
+
+```yaml
+# reference.dut.yaml
+dut: reference
+
+can:
+  node: REFDEV            # the DUT's node name in the DBC files
+  dbc: [reference.dbc]    # signals in these files become DUT signals
+
+signals:                  # signals listed directly
+  supply_enable: {type: bool, direction: input}
+  supply_ok: {type: bool, direction: output}
+
+overrides:                # adjust imported signals
+  Setpoint: {unit: degC}
+
+standards: []             # reserved: see below
+```
+
+For an imported DBC signal, the direction comes from the DBC: a signal in a
+message the DUT's node sends is an `output`, and one in a message it receives
+is an `input`. An `overrides` entry can change that, and can also set a unit the
+DBC lacks. Signal names must be unique across all sources, and the error for a
+clash names both places it was defined.
+
+**Standards.** A DUT may support standard protocols, such as J1939, that require
+a defined set of messages. The `standards:` key will declare these, and
+BenchTare will bring in that standard's signals. No standard is available in the
+first slice, so any value is rejected with "not available in this version".
+Before a standard is added, its source needs checking: some are freely
+published, and some (such as SAE's J1939 definitions) are copyrighted.
+
+## The bench file
+
+The bench file lists the equipment. Each item has a backend (the code that
+drives that kind of equipment) and channels. A channel can be driven, read, or
+both. A bus such as CAN is a single channel. The interface description says
+where each signal sits in the frames.
+
+```yaml
+# bench-sim.yaml
+bench: laptop-sim
+
+equipment:
+  can0:
+    backend: sim_can      # a virtual CAN bus: one channel, the bus itself
+  io:
+    backend: sim          # simulated digital I/O
+    channels:
+      out1: {drive: true}
+      out2: {drive: true}
+      in1: {read: true}
+      in2: {read: true}
+```
+
+A bench file describes equipment only. It names no DUT signals, so it can be
+reused for any DUT.
+
+## The harness file
+
+The harness file connects the bench to the DUT. It says which bench channel
+each signal is on, which loopbacks the harness provides, and how to tell that
+the DUT is present.
+
+```yaml
+# harness-sim.yaml
+harness: reference-on-laptop
+
+connections:              # signal: equipment[.channel]
+  Setpoint: can0
+  Measured: can0
+  ModeRequest: can0
+  Mode: can0
+  supply_enable: io.out1
+  supply_ok: io.in1
+
+loopbacks:                # a bench output wired straight back to a bench input
+  - {drive: io.out2, read: io.in2}
+
+presence:                 # how to tell the DUT is connected and alive
+  - {bus: can0, within: 1.0}        # any DUT traffic on the bus
+  - {signal: Mode, within: 2.0}     # this signal is received
+
+simulate: reference       # only for simulated setups: which simulated DUT to plug in
+```
+
+Every signal used by a test needs a connection. A DUT `input` must be connected
+to a channel the bench can drive, and a DUT `output` to one it can read. The
+harness file is checked against both the interface description and the bench
+file when it loads, and an error names the file, the signal and the channel.
+
+With real hardware the harness is a physical thing and the file describes it.
+With a simulated bench, the simulation builds its wiring from the harness file
+and plugs in the simulated DUT named by `simulate:`.
+
+## Staging
+
+Most tests need the DUT in a particular state first. Staging is done with
+ordinary pytest fixtures in the team's `conftest.py`:
+
+```python
+# conftest.py
+import pytest
+
+
+@pytest.fixture
+def running(bench, signals):
+    """The DUT has booted and is in run mode."""
+    bench.wait_until(signals.Mode, "standby", timeout=2.0)
+    bench.write(signals.ModeRequest, "run")
+    bench.wait_until(signals.Mode, "run", timeout=1.0)
+```
+
+If a staging fixture fails, pytest reports an **error**, not a test failure. A
+DUT that never got ready is not counted against the test that needed it.
+
+## Tests
+
+Tests are plain pytest. They take the `bench` and `signals` fixtures, plus any
+staging fixtures, and need no BenchTare imports.
+
+```python
+# test_setpoint.py
+import pytest
+
+
+def test_setpoint_is_tracked(running, bench, signals):
+    bench.write(signals.Setpoint, 42.0)
+    assert bench.read(signals.Measured, timeout=1.0) == pytest.approx(42.0, abs=0.5)
+```
+
+The `bench` fixture provides:
+
+| Call | What it does |
+| --- | --- |
+| `bench.write(signal, value)` | Drive a DUT input |
+| `bench.read(signal, timeout)` | Return the first value of the signal received **after the bench's most recent write**, waiting up to `timeout` seconds. A stale value from before the write is never returned, and a fast reply is never missed |
+| `bench.wait_until(signal, expected, timeout)` | Wait until the signal equals `expected`, or until a predicate given as `expected` is true |
+
+A timeout raises an error that names the signal, its channel and the timeout.
+
+**DUT faults are stimuli.** To test how the DUT handles a fault, the test writes
+the input that represents it: an implausible sensor value, a mode request the
+DUT should refuse. BenchTare does not model faults specific to any DUT.
+Standard faults for standard interfaces, such as dropping or stopping a CAN
+message, may be added later as stimuli the bench can produce.
+
+Every value read is recorded with the result. So are any values a test adds
+with pytest's built-in `record_property`.
+
+## Proving the results can be trusted
+
+BenchTare checks three things: the bench, the harness and the tests.
+
+### The self-test (before every session)
+
+The self-test runs before any test. If it fails, the session stops, no tests
+run, and the message says what failed and what to check.
+
+- **Bench check.** Each equipment item opens and reports itself healthy.
+- **Harness check.** Each loopback reads back what was driven, and each presence
+  check passes. This catches a disconnected cable, a missing DUT, or a DUT that
+  never booted, before those turn into confusing test failures.
+
+`benchtare selftest` runs the self-test on its own.
+
+### The test check (on demand)
+
+A test that passes whatever the DUT does proves nothing. The test check reruns
+each test with its readings corrupted, and reports any test that still passes.
+It corrupts what the test reads, not the DUT, so it works for any DUT.
+
+| Mode | What the test reads instead |
+| --- | --- |
+| `shift` | A different value: numbers shifted, bools inverted, another enum value |
+| `stale` | The value from before the most recent write |
+
+A test counts as able to fail if at least one mode makes it fail. Read timeouts
+don't count, because a timeout fails every test whether or not its assertions
+are any good.
+
+The test check roughly doubles run time, so it runs on demand (`benchtare
+check-tests` or `pytest --check-tests`), not every session. Its results are
+stored, and each manifest records when each test file was last checked and
+whether it has changed since.
+
+## Results and the manifest
+
+Every session is recorded in a local SQLite database (`.benchtare/` by
+default), using a versioned schema. Each run stores:
+
+- each test's outcome, duration and the values it read;
+- a **manifest**: the BenchTare and Python versions, a timestamp, and hashes of
+  the interface description, its DBC files, the bench file, the harness file
+  and each test file.
+
+The manifest makes a run reproducible. It shows which DUT description, bench
+and harness a result came from, and whether anything has changed since.
+
+## The reference
+
+BenchTare ships a simulated **reference** DUT, with its interface description,
+bench files and harness files, inside the package. It's used for the quickstart
+(`benchtare init`) and for BenchTare's own test suite, so nothing needs
+hardware.
+
+The reference DUT behaves simply and predictably:
+
+- It boots after a short delay, then reports `Mode = standby`.
+- Writing `ModeRequest = run` moves it to `run`.
+- In `run`, it echoes `Setpoint` back as `Measured` after a fixed delay.
+- `supply_ok` follows `supply_enable`.
+
+For BenchTare's own tests only, the simulated bench can cut a simulated wire or
+fail a simulated equipment item, which proves the self-test catches real
+problems.
+
+## What BenchTare doesn't do
+
+- **It isn't a test runner.** pytest runs the tests.
+- **It doesn't model DUT faults.** Those are stimuli a test writes.
+- **It doesn't judge signal values.** Pass criteria live in assertions.
+- **It isn't a real-time simulator or a board farm.** See the
+  [design brief](design-brief.md).

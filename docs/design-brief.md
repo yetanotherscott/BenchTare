@@ -1,7 +1,9 @@
 # BenchTare Design Brief: A Self-Verifying HIL/SIL Test Framework
 
 This is a Markdown copy of the design brief, kept with the code so that the
-goals and constraints travel with the repository.
+goals and constraints travel with the repository. The terms it uses (DUT,
+signal, bench, harness, staging, self-test, test check) are defined in
+[model.md](model.md).
 
 ## Purpose
 
@@ -25,13 +27,14 @@ Status: second draft.
 ## Goals
 
 1. **Complete out of the box.** A team installs the tool, describes its bench,
-   and runs tests. Tests address named signals with units, and the mapping to
-   bus messages or I/O channels is declared in a file, not coded.
-2. **Proves its own reliability.** A bench self-test checks a known stimulus
-   against a known response before each run. A run manifest records the
-   framework, test and bench versions. Fault injection shows that a test can
-   fail. A simulated reference bench ships with the project and verifies every
-   framework change, like unit tests for the framework itself.
+   and runs tests. Tests address named signals with units. Which bench channel
+   carries each signal is declared in a harness file, not coded.
+2. **Proves its own reliability.** Before each run, a self-test checks the
+   bench equipment and the harness that connects it to the DUT. A run manifest
+   records the framework version and the DUT, bench, harness and test files. A
+   test check corrupts what tests read, to show that each test can fail. A
+   simulated reference DUT, bench and harness ship with the project and verify
+   every framework change, like unit tests for the framework itself.
 3. **Agnostic to target and hardware.** It works with any embedded target,
    whatever its software architecture. Transports are plugins: CAN, serial,
    sockets, MQTT, DAQ I/O or anything else. Backends are defined by capability,
@@ -69,16 +72,17 @@ Status: second draft.
 
 ## How it works
 
-The team declares its device's interfaces and its bench wiring, and optionally
-its requirements. The tool turns those into signal fixtures and requirement
+The team declares its device's interfaces, its bench and the harness between
+them, and optionally its requirements. Tests stage the device into the state
+they need with ordinary pytest fixtures. The tool turns those into signal fixtures and requirement
 IDs, so the only code the team writes is the tests.
 
 ```
  SUPPLIED BY THE TEAM
  +------------------------+   +------------------------+   +------------------------+
- | Requirements (optional)|   | Interface description  |   | Bench file             |
- | Doorstop tree or ReqIF |   | DBC, EDS, register map |   | maps signals to        |
- |                        |   | or YAML                |   | channels               |
+ | Requirements (optional)|   | Interface description  |   | Bench + harness files  |
+ | Doorstop tree or ReqIF |   | one file per DUT; may  |   | equipment, and how it  |
+ |                        |   | import DBC files       |   | connects to the DUT    |
  +-----------+------------+   +-----------+------------+   +-----------+------------+
              |                            |                            |
              v                            v                            v
@@ -105,39 +109,44 @@ IDs, so the only code the team writes is the tests.
                               +------------------------+
 ```
 
-Before each run the backend checks itself against a known stimulus and
-response. Switching the backend moves the same tests between simulation and
-hardware, over whichever transport plugin the bench uses. Every run ends in a
-results record with a manifest of the framework, test and bench versions.
+Before each run the bench and harness check themselves: the equipment reports
+healthy, loopbacks read back what was driven, and the DUT is present.
+Switching the bench and harness files moves the same tests between simulation
+and hardware, over whichever transport plugin the bench uses. Every run ends
+in a results record with a manifest of the framework version and the DUT,
+bench, harness and test files.
 
-**What the interface description is.** A DBC file is the common format for
-describing CAN traffic: message IDs, where each signal sits in the bits, and
-its scaling and units. Importing one gives tests named signals with no
-hand-written wrappers. It only covers CAN, so it is one generator among
-several. CANopen EDS files, Modbus register maps and a hand-written YAML signal
-list fill the same role for other targets.
+**What the interface description is.** One file per DUT lists the signals it
+exposes. It can list them directly, import them from DBC files, or both. DBC is
+the common format for CAN traffic: message IDs, where each signal sits in the
+bits, and its scaling and units. Importing one gives tests named signals with
+no hand-written wrappers. Later, the same file will import CANopen EDS files
+and Modbus register maps, and declare the standard protocols a DUT supports,
+such as J1939, which bring their required messages with them.
 
 ## First slice
 
 The first release is one thin path from signals to results, small enough to
 finish in a few weeks.
 
-1. Generate named, typed signals from a DBC file or a hand-written YAML signal
-   list.
-2. Run on a simulated backend: a virtual CAN bus through python-can, with a
-   simulated device answering.
-3. Run the bench self-test before the tests: a known stimulus must produce the
-   known response.
-4. Write a pytest test that uses only generated signals.
+1. Describe a DUT in one interface description: signals listed directly,
+   imported from a DBC file, or both.
+2. Run on simulated equipment (in-process I/O and a virtual CAN bus through
+   python-can) with a simulated reference DUT answering.
+3. Run the self-test before the tests: the bench equipment is healthy, the
+   harness loopbacks read back, and the DUT is present.
+4. Write a pytest test, with a staging fixture, that uses only signal names.
 5. Record the run in a local database with a stable schema, with a manifest of
-   the framework version and the test and bench file hashes.
-6. Optional: import requirements from a Doorstop tree, tag the test with a
+   the framework version and hashes of the DUT, bench, harness and test files.
+6. Run the test check, which corrupts what the test reads and confirms that
+   the test can fail.
+7. Optional: import requirements from a Doorstop tree, tag the test with a
    requirement ID, and get a trace report.
 
 **Acceptance check:** a person who knows pytest and has never seen the tool
 installs it, runs the scaffold command on the example project, and has a
-passing test in under 15 minutes. A deliberately injected fault then makes
-that test fail.
+passing test in under 15 minutes. The test check then shows that the test can
+fail.
 
 See [first-slice-plan.md](first-slice-plan.md) for the build order.
 
@@ -150,7 +159,7 @@ proposal.
 | --- | --- | --- |
 | 2 | Backends | First hardware: SocketCAN plus two dissimilar low-cost DAQ devices, to prove the capability interface |
 | 3 | Transports | Transport plugin interface, with serial, TCP/UDP sockets and MQTT as the first plugins |
-| 4 | Self-verification | Fault injection for tests; the shipped reference bench extended to cover each new backend and transport |
+| 4 | Self-verification | Standard interface fault stimuli, such as dropped or stopped CAN messages; the shipped reference extended to cover each new backend and transport |
 | 5 | Requirements | ReqIF, StrictDoc and Sphinx-Needs importers; trace report |
 | 6 | Analysis | Remote database option; trends for pass rate, duration and measured values |
 | 7 | Protocols | CANopen and Modbus, each with a CI reference; J1939 and ISOBUS considered after that |
@@ -209,7 +218,8 @@ not from hands-on evaluation.
 
 **Open questions**
 
-- [ ] Confirm the name is free on PyPI and GitHub, then reserve it.
+- [x] Confirm the name is free on PyPI and GitHub. (Reserving it on PyPI is
+      still to do.)
 - [ ] Standalone project, or built on Jumpstarter's driver model?
 - [ ] Which two dissimilar low-cost DAQ devices prove the capability interface first?
 - [ ] Which transport plugin ships second, after virtual CAN?

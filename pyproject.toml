@@ -28,7 +28,7 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff"]
 
-# Add these when the modules exist (milestones M3 and M6):
+# Add these when the modules exist (pytest11 in M3, the console script in M4):
 #
 # [project.scripts]
 # benchtare = "benchtare.cli:main"
