@@ -55,9 +55,17 @@ class CanSignalRef:
     """Where a DUT signal sits in a DBC file. Used by CAN backends to encode and decode it."""
 
     dbc: Path
-    message: str
+    message: str  # unique within its DBC file; frame IDs need not be (standard vs extended)
     frame_id: int
     signal: str  # the name in the DBC; the DUT signal's name differs if an override renamed it
+    extended: bool = False  # a 29-bit identifier
+    fd: bool = False  # a CAN FD frame: marked FD in the DBC, or longer than 8 bytes
+    multiplexed: bool = False  # the message is multiplexed
+
+    @property
+    def frame_key(self) -> tuple[int, bool]:
+        """How a received frame is matched to its message: the ID and whether it is extended."""
+        return (self.frame_id, self.extended)
 
 
 @dataclass(frozen=True)
@@ -340,6 +348,9 @@ def _import_dbc(
                         message=message.name,
                         frame_id=message.frame_id,
                         signal=dbc_signal.name,
+                        extended=bool(message.is_extended_frame),
+                        fd=bool(message.is_fd) or message.length > 8,
+                        multiplexed=bool(message.is_multiplexed()),
                     ),
                 )
             )
@@ -347,7 +358,10 @@ def _import_dbc(
 
 def _dbc_type(dbc_signal: Any) -> tuple[SignalType, tuple[str, ...]]:
     if dbc_signal.choices:
-        return SignalType.ENUM, tuple(str(v) for v in dbc_signal.choices.values())
+        # Real DBCs often give several codes one name, such as "Reserved". The signal lists each
+        # name once; writing an ambiguous name is refused on the bus, and the raw code works.
+        names = dict.fromkeys(str(v) for v in dbc_signal.choices.values())
+        return SignalType.ENUM, tuple(names)
     scaled = not _integral(dbc_signal.scale) or not _integral(dbc_signal.offset)
     if dbc_signal.is_float or scaled:
         return SignalType.FLOAT, ()

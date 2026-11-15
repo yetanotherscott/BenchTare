@@ -135,7 +135,22 @@ behind the same interface.
 - **`sim`** is simulated I/O with named channels. Its read channels are sampled
   continuously, like a DAQ.
 - **`sim_can`** is a virtual CAN bus. Each bench gets a bus of its own, so two
-  benches in one process never hear each other.
+  benches in one process never hear each other. Like a real interface, it
+  carries CAN FD frames only with `fd: true`. It ignores python-can's own
+  configuration (`~/.canrc`, `can.ini`, `CAN_*` environment variables), so a
+  setting on one machine can't change how the simulation behaves.
+
+The CAN details that matter:
+
+- **Message lookup.** Messages are matched by name, and received frames by ID
+  and frame type. A standard and an extended frame with the same ID number
+  never mix.
+- **CAN FD.** A CAN FD message is one the DBC marks as FD, or one longer than
+  8 bytes. The harness file refuses to put one on a bus that isn't in FD mode.
+- **Multiplexing.** Signals in multiplexed messages can be read. They can't be
+  written on a bus yet, because a frame has to carry the right multiplexer
+  value. The harness file refuses a multiplexed DUT input on a bus, rather than
+  letting a write silently leave it out.
 
 ## The harness file
 
@@ -258,8 +273,26 @@ gives the last value received and how long ago, and says what to check. If the
 equipment reports a fault, the error says that instead.
 
 Writing a DUT output, or reading a DUT input, is refused. Tests drive inputs and
-read outputs. An enum can be written by value name, or as a raw number to send
-a code the DUT doesn't define.
+read outputs.
+
+**What can be written.** A value must be of the signal's kind. That is checked
+before any equipment sees the value, so a simulated channel refuses exactly
+what real hardware would.
+
+| Signal type | Takes |
+| --- | --- |
+| `float` | Any number. NaN and infinity are passed on, and the channel decides whether it can carry them |
+| `int` | A whole number (`2` or `2.0`, not `2.5`) |
+| `bool` | `True`, `False`, `0` or `1` |
+| `enum` | One of its value names, or a raw whole number to send a code the DUT doesn't define |
+
+A DBC may give several codes the same name, such as `Reserved`. The signal
+lists the name once. Writing an ambiguous name is refused with the codes it
+could mean, and the raw code works.
+
+**Timeouts** are a number of seconds, 0 or more. There is no "wait forever", so
+a missing DUT can't hang a run. A timeout of 0 looks only at what has already
+arrived.
 
 **DUT faults are stimuli.** To test how the DUT handles a fault, the test writes
 the input that represents it: an implausible sensor value, a mode request the
@@ -344,6 +377,11 @@ The reference DUT behaves simply and predictably:
 The device itself deals only in signal values. The simulation wires it to the
 bench by following the harness file, so the same device runs behind a virtual
 CAN bus or behind simulated I/O channels.
+
+Like a well-behaved real device, it ignores inputs it can't use. If one of its
+own actions fails anyway, it keeps running and records the error.
+`bench.check()` lists that error under `simulated DUT`, and so do read
+timeouts, so a bug in the simulation is never mistaken for a slow DUT.
 
 For BenchTare's own tests only, the simulation can cut a simulated wire, unplug
 the DUT from a bus, or fail a simulated equipment item. That proves the

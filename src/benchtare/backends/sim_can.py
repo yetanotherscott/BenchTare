@@ -4,11 +4,14 @@ The bus is a single channel. Each signal's place in the frames comes from the DB
 interface description. Every ``open()`` uses its own virtual bus name, so two benches in one
 process never hear each other, unless the bench file fixes the name with ``bus:``.
 
+Like a real interface, the bus carries CAN FD frames only when it is opened in FD mode.
+
 Bench file:
 
     can0:
       backend: sim_can
       bus: my-bus          # optional virtual bus name
+      fd: true             # optional; needed for CAN FD messages
 """
 
 from __future__ import annotations
@@ -19,11 +22,19 @@ from typing import Any, ClassVar
 
 import can
 
-from benchtare.backends._can_codec import CanCodec, CarryError, to_python
+from benchtare._yaml import kind_of
+from benchtare.backends._can_codec import (
+    CanCodec,
+    CarryError,
+    frame,
+    frame_key,
+    open_virtual_bus,
+    to_python,
+)
 from benchtare.backends.base import Binding, ChannelCaps, EquipmentKind, Receiver, WriteError
 from benchtare.errors import Problem
 
-_OPTIONS = ("bus",)
+_OPTIONS = ("bus", "fd")
 
 
 class SimCan:
@@ -42,26 +53,34 @@ class SimCan:
                     Problem(
                         f"unknown option '{key}' for a sim_can backend",
                         where=where,
-                        hint="a CAN bus has no channels; its only option is 'bus' "
-                        "(the virtual bus name)",
+                        hint="a CAN bus has no channels; its options are 'bus' "
+                        "(the virtual bus name) and 'fd' (CAN FD mode)",
                     )
                 )
         bus = options.get("bus")
         if bus is not None and (not isinstance(bus, str) or not bus):
             problems.append(Problem("'bus:' must be a name", where=where))
+        fd = options.get("fd", False)
+        if not isinstance(fd, bool):
+            problems.append(Problem(f"'fd:' must be true or false, not {kind_of(fd)}", where=where))
         return {}
+
+    @staticmethod
+    def carries_fd(options: Mapping[str, Any]) -> bool:
+        return options.get("fd") is True
 
     def __init__(
         self, equipment: str, options: Mapping[str, Any], channels: Mapping[str, ChannelCaps]
     ) -> None:
         self.equipment = equipment
+        self.fd = self.carries_fd(options)
         self._fixed_bus_name: str | None = options.get("bus")
         self.bus_name: str | None = None
         self._bus: can.BusABC | None = None
         self._notifier: can.Notifier | None = None
         self._codec = CanCodec()
         self._receiver: Receiver | None = None
-        self._rx: dict[int, tuple[Any, list[Binding]]] = {}
+        self._rx: dict[tuple[int, bool], list[tuple[Any, Binding]]] = {}
         self._failure: str | None = None
 
     def open(self, bindings: Sequence[Binding], receiver: Receiver) -> None:
@@ -70,10 +89,9 @@ class SimCan:
             if binding.drive or binding.can is None:
                 continue
             message = self._codec.message(binding.can)
-            _, listening = self._rx.setdefault(binding.can.frame_id, (message, []))
-            listening.append(binding)
+            self._rx.setdefault(binding.can.frame_key, []).append((message, binding))
         self.bus_name = self._fixed_bus_name or f"benchtare-{self.equipment}-{uuid.uuid4().hex}"
-        self._bus = can.Bus(interface="virtual", channel=self.bus_name)
+        self._bus = open_virtual_bus(self.bus_name, fd=self.fd)
         self._notifier = can.Notifier(self._bus, [self._on_frame], timeout=0.05)
 
     def close(self) -> None:
@@ -97,36 +115,41 @@ class SimCan:
                 f"can't write {binding.key} on {self.equipment}: {self._failure}",
                 hint=f"equipment '{self.equipment}'",
             )
-        assert binding.can is not None and self._bus is not None
+        ref = binding.can
+        assert ref is not None and self._bus is not None
+        if ref.fd and not self.fd:
+            raise WriteError(
+                f"can't write {binding.key} on {self.equipment}: message {ref.message} is a "
+                "CAN FD frame, and the bus isn't in FD mode",
+                hint=f"set fd: true for {self.equipment} in the bench file",
+            )
         try:
-            message, data = self._codec.encode(binding.can, value)
+            _, data = self._codec.encode(ref, value)
         except CarryError as exc:
             raise WriteError(
                 f"can't write {binding.key} = {value!r} on {self.equipment}: it doesn't fit "
-                f"in message {binding.can.message} ({exc.reason})",
+                f"in message {ref.message} ({exc.reason})",
                 hint=exc.limits,
             ) from None
-        self._bus.send(
-            can.Message(
-                arbitration_id=message.frame_id,
-                data=data,
-                is_extended_id=message.is_extended_frame,
-            )
-        )
+        self._bus.send(frame(ref, data))
 
     def fail(self, reason: str = "simulated equipment failure") -> None:
         """Simulate a failed CAN interface: check() reports it, and nothing passes."""
         self._failure = reason
 
-    def _on_frame(self, frame: can.Message) -> None:
-        entry = self._rx.get(frame.arbitration_id)
+    def _on_frame(self, received: can.Message) -> None:
+        listening = self._rx.get(frame_key(received))
         receiver = self._receiver
-        if entry is None or receiver is None or self._failure is not None:
+        if not listening or receiver is None or self._failure is not None:
             return
-        message, listening = entry
-        decoded = self._codec.decode(message, bytes(frame.data))
-        for binding in listening:
+        decoded_by_message: dict[int, dict[str, Any]] = {}
+        for message, binding in listening:
             assert binding.can is not None
+            decoded = decoded_by_message.get(id(message))
+            if decoded is None:
+                decoded = decoded_by_message[id(message)] = self._codec.decode(
+                    message, bytes(received.data)
+                )
             if binding.can.signal in decoded:
                 signal_type = binding.signal.type if binding.signal else None
                 receiver.deliver(binding.key, to_python(signal_type, decoded[binding.can.signal]))

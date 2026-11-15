@@ -276,6 +276,8 @@ Do not build these yet, even where the design brief describes them:
 - Protocols above raw CAN signals (CANopen, Modbus, UDS, J1939, ISOBUS),
   including any `standards:` value in an interface description.
 - Interface-level fault stimuli, such as dropping or stopping a CAN message.
+- Writing multiplexed CAN signals. Reading them works, and the harness file
+  refuses a multiplexed DUT input on a bus.
 - A remote database.
 - ReqIF, StrictDoc or Sphinx-Needs importers.
 - Write-back to any requirements tool.

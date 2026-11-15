@@ -6,7 +6,7 @@ import pytest
 
 from benchtare import reference
 from benchtare.backends.base import BenchError, ReadTimeout, WriteError
-from benchtare.bench.runtime import open_bench
+from benchtare.bench.runtime import SIMULATION, open_bench
 
 HARNESSES = [reference.HARNESS_CAN, reference.HARNESS_IO]
 
@@ -67,7 +67,7 @@ def test_supply_ok_follows_supply_enable(bench):
 
 
 def test_equipment_reports_healthy(bench):
-    assert bench.check() == {"can0": [], "io": []}
+    assert bench.check() == {"can0": [], "io": [], SIMULATION: []}
 
 
 def test_values_have_python_types(can_bench):
@@ -179,9 +179,13 @@ def test_undefined_enum_code_can_be_sent_as_a_raw_number(can_bench):
         can_bench.wait_until(signals.Mode, "run", timeout=0.2)
 
 
-def test_unknown_enum_name_lists_the_values(can_bench):
-    with pytest.raises(WriteError, match=r"'go' is not one of its values \(standby, run\)"):
-        can_bench.write(can_bench.signals.ModeRequest, "go")
+def test_unknown_enum_name_lists_the_values(bench):
+    # Refused before any backend sees it, so both harnesses say the same thing.
+    with pytest.raises(WriteError) as info:
+        bench.write(bench.signals.ModeRequest, "go")
+    text = str(info.value)
+    assert "'go' is not one of the values of ModeRequest" in text
+    assert "its values are standby, run; a raw number sends an undefined code" in text
 
 
 def test_writing_a_dut_output_is_refused(bench):

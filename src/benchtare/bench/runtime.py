@@ -14,6 +14,8 @@ See docs/model.md.
 
 from __future__ import annotations
 
+import math
+import numbers
 import os
 import time
 from collections.abc import Callable, Mapping
@@ -31,13 +33,17 @@ from benchtare.backends.base import (
 from benchtare.bench.config import BenchConfig, load_bench_file
 from benchtare.dut.description import InterfaceDescription, load_interface_description
 from benchtare.harness.config import HarnessConfig, load_harness_file
-from benchtare.signals.model import Direction, Signal, SignalSet
+from benchtare.signals.model import Direction, Signal, SignalSet, SignalType
 from benchtare.sim.simulation import Simulation
 
 if TYPE_CHECKING:
     from typing_extensions import Self  # typing.Self needs Python 3.11
 
 DEFAULT_TIMEOUT = 1.0
+
+# The key under which Bench.check() lists the simulation's own problems. It has a space, so it
+# can never be an equipment name.
+SIMULATION = "simulated DUT"
 
 
 def open_bench(
@@ -120,13 +126,23 @@ class Bench:
         self.close()
 
     def check(self) -> dict[str, list[str]]:
-        """The problems each equipment item reports; empty lists when all is healthy."""
-        return {name: backend.check() for name, backend in self._backends.items()}
+        """The problems each equipment item reports; empty lists when all is healthy.
+
+        With a simulated DUT, the simulation's own problems are listed under ``SIMULATION``.
+        """
+        problems = {name: backend.check() for name, backend in self._backends.items()}
+        if self.simulation is not None:
+            problems[SIMULATION] = self.simulation.check()
+        return problems
 
     # --- what tests call --------------------------------------------------------------------
 
     def write(self, signal: Signal | str, value: Any) -> None:
-        """Drive a DUT input. Raise ``WriteError`` if its channel can't carry ``value``."""
+        """Drive a DUT input. Raise ``WriteError`` if its channel can't carry ``value``.
+
+        The value must be of a kind the signal has (see ``_kind_problem``); within that, any
+        value the channel can carry is sent, however implausible.
+        """
         binding = self._binding(signal)
         if not binding.drive:
             raise WriteError(
@@ -134,6 +150,11 @@ class Bench:
                 hint="tests write DUT inputs and read DUT outputs; see the direction in "
                 f"{self.description.path.name}",
             )
+        assert binding.signal is not None
+        problem = _kind_problem(binding.signal, value)
+        if problem is not None:
+            message, hint = problem
+            raise WriteError(f"can't write {binding.key} = {value!r}: {message}", hint=hint)
         backend = self._backends[binding.equipment]
         with self._buffer.writing():
             backend.write(binding, value)
@@ -141,6 +162,7 @@ class Bench:
     def read(self, signal: Signal | str, timeout: float = DEFAULT_TIMEOUT) -> Any:
         """Return the first value of a DUT output received after the most recent write."""
         binding = self._readable(signal)
+        _check_timeout(timeout)
         item = self._buffer.first_after_write(binding.key, timeout)
         if item is None:
             raise ReadTimeout(
@@ -159,6 +181,7 @@ class Bench:
         """Wait for a value of a DUT output, received after the most recent write, that equals
         ``expected``, or for which ``expected`` returns true if it is a function. Return it."""
         binding = self._readable(signal)
+        _check_timeout(timeout)
         matches: Callable[[Any], bool] = (
             expected if _is_predicate(expected) else (lambda value: value == expected)
         )
@@ -213,6 +236,8 @@ class Bench:
         problems = self._backends[binding.equipment].check()
         if problems:
             return f"equipment '{binding.equipment}' reports: {'; '.join(problems)}"
+        if self.simulation is not None and (sim_problems := self.simulation.check()):
+            return "; ".join(sim_problems)
         return (
             f"the DUT is powered and connected at {binding.endpoint}, and sends {binding.key}; "
             f"see harness file {self.harness.path.name}"
@@ -243,3 +268,62 @@ def _bindings(description: InterfaceDescription, harness: HarnessConfig) -> dict
 def _is_predicate(expected: Any) -> bool:
     # pytest.approx and similar comparison helpers are not callable; plain functions are.
     return callable(expected) and not isinstance(expected, type)
+
+
+def _check_timeout(timeout: Any) -> None:
+    """A timeout is a finite number of seconds, 0 or more. A bench never waits forever."""
+    ok = (
+        isinstance(timeout, numbers.Real)
+        and not isinstance(timeout, bool)
+        and math.isfinite(float(timeout))
+        and timeout >= 0
+    )
+    if not ok:
+        raise BenchError(
+            f"timeout must be a number of seconds, 0 or more; got {timeout!r}",
+            hint="for example timeout=1.0; there is no 'wait forever', so a missing DUT can't "
+            "hang the run",
+        )
+
+
+def _kind_problem(signal: Signal, value: Any) -> tuple[str, str] | None:
+    """Whether ``value`` is a kind of value ``signal`` can have. Return (problem, hint) if not.
+
+    This checks the kind only (a number for a float signal, a value name for an enum), so that
+    every backend, simulated or real, refuses the same things. Whether a number fits the
+    channel is the backend's business, and whether it is a sensible value is the test's.
+    """
+    kind = signal.type
+    is_number = isinstance(value, numbers.Real) and not isinstance(value, bool)
+    if kind is SignalType.FLOAT:
+        if is_number:
+            return None
+        return (f"{signal.name} is a float signal", "write a number, for example 42.0")
+    if kind is SignalType.INT:
+        if is_number and _is_whole(value):
+            return None
+        return (f"{signal.name} is an int signal", "write a whole number, for example 42")
+    if kind is SignalType.BOOL:
+        if isinstance(value, bool) or (isinstance(value, numbers.Integral) and value in (0, 1)):
+            return None
+        return (f"{signal.name} is a bool signal", "write True or False")
+    # An enum takes one of its value names, or a raw code to send a code the DUT doesn't define.
+    if isinstance(value, str):
+        if value in signal.values:
+            return None
+        return (
+            f"'{value}' is not one of the values of {signal.name}",
+            f"its values are {', '.join(signal.values)}; a raw number sends an undefined code",
+        )
+    if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+        return None
+    return (
+        f"{signal.name} is an enum signal",
+        f"write one of {', '.join(signal.values)}, or a raw whole number for an undefined code",
+    )
+
+
+def _is_whole(value: numbers.Real) -> bool:
+    return isinstance(value, numbers.Integral) or (
+        math.isfinite(float(value)) and float(value).is_integer()
+    )

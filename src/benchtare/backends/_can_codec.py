@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import can
 import cantools
 
 from benchtare.dut.description import CanSignalRef
@@ -29,37 +30,65 @@ class CanCodec:
 
     def __init__(self) -> None:
         self._databases: dict[Path, Any] = {}
-        self._state: dict[int, dict[str, Any]] = {}
+        self._state: dict[tuple[Path, str], dict[str, Any]] = {}
 
     def message(self, ref: CanSignalRef) -> Any:
         database = self._databases.get(ref.dbc)
         if database is None:
             database = cantools.database.load_file(str(ref.dbc), database_format="dbc")
             self._databases[ref.dbc] = database
-        return database.get_message_by_frame_id(ref.frame_id)
+        # By name: a standard and an extended frame may share an ID number.
+        return database.get_message_by_name(ref.message)
 
     def encode(self, ref: CanSignalRef, value: Any) -> tuple[Any, bytes]:
         """Set one signal and return (message, frame data). Raise ``CarryError``."""
         message = self.message(ref)
-        state = self._state.setdefault(ref.frame_id, _initial_values(message))
+        state = self._state.setdefault((ref.dbc, ref.message), _initial_values(message))
         dbc_signal = message.get_signal_by_name(ref.signal)
+        if isinstance(value, str) and dbc_signal.choices:
+            codes = [code for code, name in dbc_signal.choices.items() if str(name) == value]
+            if not codes:
+                names = ", ".join(dict.fromkeys(str(v) for v in dbc_signal.choices.values()))
+                raise CarryError(
+                    f"{value!r} is not one of its values ({names})",
+                    "a value name, or a raw number to send an undefined code",
+                )
+            if len(codes) > 1:
+                raise CarryError(
+                    f"{value!r} is the name of codes {', '.join(str(c) for c in codes)}",
+                    f"write the raw code you mean, for example bench.write(signal, {codes[0]})",
+                )
         candidate = dict(state)
         candidate[ref.signal] = _to_dbc(value)
         try:
             data = message.encode(candidate, strict=False)
-        except KeyError:
-            choices = [str(v) for v in (dbc_signal.choices or {}).values()]
-            raise CarryError(
-                f"{value!r} is not one of its values ({', '.join(choices)})",
-                "a value name, or a raw number to send an undefined code",
-            ) from None
-        except (OverflowError, ValueError, TypeError) as exc:
-            raise CarryError(str(exc), _limits(dbc_signal)) from None
+        except Exception as exc:  # noqa: BLE001 - cantools raises many kinds; all mean "can't encode"
+            raise CarryError(str(exc) or type(exc).__name__, _limits(dbc_signal)) from None
         state[ref.signal] = candidate[ref.signal]
         return message, data
 
     def decode(self, message: Any, data: bytes) -> dict[str, Any]:
         return message.decode(data, decode_choices=True, allow_truncated=True)
+
+
+def open_virtual_bus(name: str, *, fd: bool) -> can.BusABC:
+    """A python-can virtual bus that ignores python-can's own configuration.
+
+    Without ``ignore_config``, a ``~/.canrc``, a ``can.ini`` or the ``CAN_*`` environment
+    variables on the machine would quietly change how the simulated bus behaves.
+    """
+    return can.Bus(interface="virtual", channel=name, fd=fd, ignore_config=True)
+
+
+def frame(ref: CanSignalRef, data: bytes) -> can.Message:
+    """The CAN frame that carries a message, with its ID type and FD flag from the DBC."""
+    return can.Message(
+        arbitration_id=ref.frame_id, data=data, is_extended_id=ref.extended, is_fd=ref.fd
+    )
+
+
+def frame_key(received: can.Message) -> tuple[int, bool]:
+    return (received.arbitration_id, bool(received.is_extended_id))
 
 
 def to_python(signal_type: SignalType | None, value: Any) -> Any:

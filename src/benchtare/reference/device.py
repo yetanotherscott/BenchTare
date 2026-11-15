@@ -13,12 +13,19 @@ Behaviour (all times in seconds, adjustable for tests):
 - Each ``Setpoint`` it receives is answered, ``echo_delay`` later, with ``Measured``: the
   setpoint in ``run``, and 0.0 in ``standby``.
 - ``supply_ok`` follows ``supply_enable`` immediately, booted or not.
+
+Like a well-behaved real device, it ignores inputs it can't use: a Setpoint that isn't a
+number, a ModeRequest that isn't a known mode, a supply_enable that isn't true, false, 0 or 1.
+If one of its own actions fails anyway, it records the error in ``errors`` and keeps running,
+so a simulation bug is reported (see ``Simulation.check``) rather than looking like a dead DUT.
 """
 
 from __future__ import annotations
 
 import heapq
 import itertools
+import math
+import numbers
 import threading
 import time
 from collections.abc import Callable
@@ -63,6 +70,11 @@ class ReferenceDevice:
         self._order = itertools.count()
         self._running = False
         self._thread: threading.Thread | None = None
+        self.errors: list[str] = []
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     # --- life cycle -------------------------------------------------------------------------
 
@@ -88,15 +100,16 @@ class ReferenceDevice:
 
     def set_input(self, name: str, value: Any) -> None:
         if name == "supply_enable":
-            self.supply_ok = bool(value)
-            self._publish("supply_ok", self.supply_ok)
+            if value in (True, False, 0, 1) and not isinstance(value, float):
+                self.supply_ok = bool(value)
+                self._publish("supply_ok", self.supply_ok)
             return
         with self._wake:
             if not self.booted:
                 return
-            if name == "Setpoint":
+            if name == "Setpoint" and _is_number(value):
                 self._schedule(self.echo_delay, lambda: self._answer(value))
-            elif name == "ModeRequest" and value in self.MODES:
+            elif name == "ModeRequest" and isinstance(value, str) and value in self.MODES:
                 self._schedule(self.mode_delay, lambda: self._set_mode(value))
 
     # --- behaviour --------------------------------------------------------------------------
@@ -137,4 +150,15 @@ class ReferenceDevice:
                     self._wake.wait(due - now)
                     continue
                 heapq.heappop(self._events)
-                action()
+                try:
+                    action()
+                except Exception as exc:  # noqa: BLE001 - keep the device alive, and report it
+                    self.errors.append(f"{type(exc).__name__}: {exc}")
+
+
+def _is_number(value: Any) -> bool:
+    return (
+        isinstance(value, numbers.Real)
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )

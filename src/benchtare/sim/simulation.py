@@ -17,7 +17,14 @@ from typing import Any
 
 import can
 
-from benchtare.backends._can_codec import CanCodec, CarryError, to_python
+from benchtare.backends._can_codec import (
+    CanCodec,
+    CarryError,
+    frame,
+    frame_key,
+    open_virtual_bus,
+    to_python,
+)
 from benchtare.backends.base import Backend
 from benchtare.backends.sim import SimIO
 from benchtare.backends.sim_can import SimCan
@@ -30,19 +37,18 @@ from benchtare.sim.registry import SIMULATED_DUTS
 class DutCanPort:
     """The simulated DUT's connection to one virtual CAN bus."""
 
-    def __init__(self, bus_name: str, device: Any) -> None:
+    def __init__(self, bus_name: str, device: Any, *, fd: bool) -> None:
         self._device = device
         self._codec = CanCodec()
-        self._inputs: dict[int, tuple[Any, list[tuple[str, str, SignalType]]]] = {}
+        self._inputs: dict[tuple[int, bool], list[tuple[Any, str, str, SignalType]]] = {}
         self._outputs: dict[str, CanSignalRef] = {}
-        self._bus = can.Bus(interface="virtual", channel=bus_name)
+        self._bus = open_virtual_bus(bus_name, fd=fd)
         self._notifier: can.Notifier | None = None
         self.cut = False
 
     def add_input(self, name: str, ref: CanSignalRef, signal_type: SignalType) -> None:
         message = self._codec.message(ref)
-        _, listening = self._inputs.setdefault(ref.frame_id, (message, []))
-        listening.append((name, ref.signal, signal_type))
+        self._inputs.setdefault(ref.frame_key, []).append((message, name, ref.signal, signal_type))
 
     def add_output(self, name: str, ref: CanSignalRef) -> None:
         self._outputs[name] = ref
@@ -61,24 +67,22 @@ class DutCanPort:
         if ref is None or self.cut:
             return
         try:
-            message, data = self._codec.encode(ref, value)
+            _, data = self._codec.encode(ref, value)
         except CarryError:
             return  # the DUT can't put this value on the bus; a real one would clip or refuse
-        self._bus.send(
-            can.Message(
-                arbitration_id=message.frame_id,
-                data=data,
-                is_extended_id=message.is_extended_frame,
-            )
-        )
+        self._bus.send(frame(ref, data))
 
-    def _on_frame(self, frame: can.Message) -> None:
-        entry = self._inputs.get(frame.arbitration_id)
-        if entry is None or self.cut:
+    def _on_frame(self, received: can.Message) -> None:
+        listening = self._inputs.get(frame_key(received))
+        if not listening or self.cut:
             return
-        message, listening = entry
-        decoded = self._codec.decode(message, bytes(frame.data))
-        for name, dbc_name, signal_type in listening:
+        decoded_by_message: dict[int, dict[str, Any]] = {}
+        for message, name, dbc_name, signal_type in listening:
+            decoded = decoded_by_message.get(id(message))
+            if decoded is None:
+                decoded = decoded_by_message[id(message)] = self._codec.decode(
+                    message, bytes(received.data)
+                )
             if dbc_name in decoded:
                 self._device.set_input(name, to_python(signal_type, decoded[dbc_name]))
 
@@ -161,8 +165,20 @@ class Simulation:
         port = self._ports.get(equipment)
         if port is None:
             assert backend.bus_name is not None, "open the backend before starting the simulation"
-            port = self._ports[equipment] = DutCanPort(backend.bus_name, self.device)
+            port = self._ports[equipment] = DutCanPort(backend.bus_name, self.device, fd=backend.fd)
         return port
+
+    def check(self) -> list[str]:
+        """Problems with the simulated DUT itself. A healthy simulation reports none.
+
+        The reference DUT ignores inputs it can't use and keeps running if one of its own
+        actions fails, but it reports what happened here, so a bug in a simulation never
+        passes for a DUT that is merely slow.
+        """
+        problems = [f"the simulated DUT {self._harness.simulate}: {e}" for e in self.device.errors]
+        if not self.device.running:
+            problems.append(f"the simulated DUT {self._harness.simulate} has stopped running")
+        return problems
 
     def _route(self, name: str, value: Any) -> None:
         """Called by the device for each output it produces."""

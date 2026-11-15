@@ -25,10 +25,11 @@ from types import MappingProxyType
 from typing import Any
 
 from benchtare._yaml import YAML_VALUE_WORDS, kind_of, read_mapping
-from benchtare.bench.config import BenchConfig
+from benchtare.backends import BACKENDS
+from benchtare.bench.config import BenchConfig, EquipmentConfig
 from benchtare.dut.description import InterfaceDescription
 from benchtare.errors import ConfigError, Problem
-from benchtare.signals.model import Direction
+from benchtare.signals.model import Direction, Signal
 from benchtare.sim.registry import SIMULATED_DUTS
 
 KIND = "harness file"
@@ -239,6 +240,36 @@ class _Checker:
             return False
         return True
 
+    def bus_can_carry(self, name: str, signal: Signal, equipment: EquipmentConfig) -> bool:
+        """CAN features the bus or BenchTare can't handle yet, caught before anything runs."""
+        ref = self.description.can_signals[name]
+        where = "connections:"
+        if ref.multiplexed and signal.direction is Direction.INPUT:
+            # A write would have to choose the multiplexer value too, or the frame would
+            # silently leave the signal out. Reading multiplexed DUT outputs works.
+            self.problems.append(
+                Problem(
+                    f"is in multiplexed message {ref.message}, and BenchTare can't write "
+                    "multiplexed signals on a CAN bus yet",
+                    signal=name,
+                    where=where,
+                    hint="reading multiplexed DUT outputs works; for this input, connect it to "
+                    "a plain channel or leave it out of the harness",
+                )
+            )
+            return False
+        if ref.fd and not _carries_fd(equipment):
+            self.problems.append(
+                Problem(
+                    f"is in CAN FD message {ref.message}, but bus {equipment.id} isn't in FD mode",
+                    signal=name,
+                    where=where,
+                    hint=f"set fd: true for {equipment.id} in bench file {self.bench.path.name}",
+                )
+            )
+            return False
+        return True
+
     # --- sections ---------------------------------------------------------------------------
 
     def connections(self, raw: Any) -> dict[str, Endpoint]:
@@ -293,6 +324,8 @@ class _Checker:
                         "it to a channel",
                     )
                 )
+                continue
+            if equipment.kind == "bus" and not self.bus_can_carry(name, signal, equipment):
                 continue
             is_input = signal.direction is Direction.INPUT
             why = "it is a DUT input" if is_input else "it is a DUT output"
@@ -459,3 +492,9 @@ class _Checker:
                 )
             )
         return raw
+
+
+def _carries_fd(equipment: EquipmentConfig) -> bool:
+    """Whether a bus is set up for CAN FD frames. Backends without the notion carry none."""
+    carries_fd = getattr(BACKENDS[equipment.backend], "carries_fd", None)
+    return bool(carries_fd(equipment.options)) if carries_fd is not None else False
