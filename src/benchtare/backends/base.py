@@ -9,7 +9,8 @@ equipment that stopped working) and, for the debug level, the frames it sends an
 The read rule: ``Bench.read`` returns the first value received after the bench's most recent
 write. Writes and deliveries share one lock, so a value delivered while a write is in progress
 always counts as after the write, and a reply that arrives before ``read`` is called is never
-missed. See docs/model.md.
+missed. The buffer also keeps, for the test check, each value as it was just before the most
+recent write. See docs/model.md.
 """
 
 from __future__ import annotations
@@ -47,7 +48,12 @@ class WriteError(BenchError):
 
 
 class ReadTimeout(BenchError):
-    """No value (or no matching value) arrived in time."""
+    """No value arrived in time: the DUT, its wiring or the bus didn't deliver one."""
+
+
+class ComparisonFailed(AssertionError):
+    """Values arrived, but none was the one the test waited for in time: the DUT answered with
+    the wrong value, or too late. A test failure, like a failed ``assert``."""
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,7 @@ class ReceiveBuffer:
         self._since_write: dict[str, deque[Received]] = {}
         self._first: dict[str, Received] = {}
         self._last: dict[str, Received] = {}
+        self._before_write: dict[str, Received] = {}
         # The bench's handler for test-record entries that backends note, and the level it keeps.
         self.on_note: Callable[[RecordEntry], None] | None = None
         self.note_level = RecordLevel.RESULTS
@@ -203,6 +210,7 @@ class ReceiveBuffer:
         with self.lock:
             self._seq += 1
             self._marker = self._seq
+            self._before_write = dict(self._last)
             self._since_write.clear()
             self._first.clear()
             yield
@@ -255,3 +263,21 @@ class ReceiveBuffer:
         """The most recent value of ``key`` ever received, for error messages."""
         with self.lock:
             return self._last.get(key)
+
+    @property
+    def written(self) -> bool:
+        """Whether the bench has written anything since it opened."""
+        with self.lock:
+            return self._marker > 0
+
+    def since_write(self, key: str) -> list[Received]:
+        """The values of ``key`` received after the most recent write (the latest ones, if
+        there were more than ``MAX_PER_KEY``)."""
+        with self.lock:
+            return list(self._since_write.get(key, ()))
+
+    def before_write(self, key: str) -> Received | None:
+        """The last value of ``key`` received before the most recent write, or None if there was
+        no write yet or nothing had arrived before it. The test check's ``stale`` mode."""
+        with self.lock:
+            return self._before_write.get(key)

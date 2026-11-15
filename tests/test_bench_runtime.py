@@ -1,11 +1,12 @@
 """The running bench against the simulated reference DUT, through both reference harnesses."""
 
+import re
 import textwrap
 
 import pytest
 
 from benchtare import reference
-from benchtare.backends.base import BenchError, ReadTimeout, WriteError
+from benchtare.backends.base import BenchError, ComparisonFailed, ReadTimeout, WriteError
 from benchtare.bench.runtime import SIMULATION, open_bench
 
 HARNESSES = [reference.HARNESS_CAN, reference.HARNESS_IO]
@@ -54,7 +55,7 @@ def test_without_staging_the_dut_answers_zero(bench):
     signals = bench.signals
     bench.wait_until(signals.Mode, "standby", timeout=2.0)
     bench.write(signals.Setpoint, 42.0)
-    with pytest.raises(ReadTimeout):
+    with pytest.raises(ComparisonFailed):
         bench.wait_until(signals.Measured, 42.0, timeout=0.3)
 
 
@@ -133,14 +134,32 @@ def test_read_timeout_says_what_to_check(can_bench):
     assert "harness-can.yaml" in text
 
 
-def test_wait_until_timeout_reports_last_value(can_bench):
+def test_values_that_never_match_fail_like_an_assert_with_the_last_value(can_bench):
     signals = can_bench.signals
     can_bench.wait_until(signals.Mode, "standby", timeout=2.0)
-    with pytest.raises(ReadTimeout) as info:
+    with pytest.raises(ComparisonFailed) as info:
         can_bench.wait_until(signals.Mode, "run", timeout=0.2)
+    assert isinstance(info.value, AssertionError)  # pytest reports it as a failed check
+    assert re.fullmatch(
+        r"Mode did not reach 'run' within 0\.2 s \(on can0\): \d+ values? arrived since the "
+        r"bench opened, the last 'standby'",
+        str(info.value),
+    )
+    can_bench.write(signals.ModeRequest, "standby")
+    with pytest.raises(ComparisonFailed, match="arrived after the last write, the last 'standby'"):
+        can_bench.wait_until(signals.Mode, "run", timeout=0.2)
+
+
+def test_a_wait_that_receives_nothing_is_a_read_timeout(can_bench):
+    can_bench.wait_until(can_bench.signals.Mode, "standby", timeout=2.0)
+    can_bench.simulation.cut("can0")  # unplug the DUT from the bus
+    can_bench.write(can_bench.signals.ModeRequest, "run")
+    with pytest.raises(ReadTimeout) as info:
+        can_bench.wait_until(can_bench.signals.Mode, "run", timeout=0.2)
     text = str(info.value)
-    assert "Mode did not reach 'run' within 0.2 s (on can0)" in text
-    assert "last value 'standby'" in text
+    assert "no value of Mode arrived within 0.2 s after the last write (on can0), so it " in text
+    assert "couldn't reach 'run'; last value 'standby'" in text
+    assert "Check: the DUT is powered and connected at can0" in text
 
 
 def test_wait_until_accepts_a_predicate(can_bench):
@@ -175,7 +194,7 @@ def test_undefined_enum_code_can_be_sent_as_a_raw_number(can_bench):
     signals = can_bench.signals
     can_bench.wait_until(signals.Mode, "standby", timeout=2.0)
     can_bench.write(signals.ModeRequest, 3)  # not a defined value: the DUT should ignore it
-    with pytest.raises(ReadTimeout):
+    with pytest.raises(ComparisonFailed):
         can_bench.wait_until(signals.Mode, "run", timeout=0.2)
 
 
@@ -235,9 +254,9 @@ def test_two_can_benches_in_one_process_are_isolated():
         assert one.wait_until(one.signals.Measured, eleven, timeout=2.0) == eleven
         assert two.wait_until(two.signals.Measured, twenty_two, timeout=2.0) == twenty_two
         # Neither bench hears the other's DUT.
-        with pytest.raises(ReadTimeout):
+        with pytest.raises(ComparisonFailed):
             two.wait_until(two.signals.Measured, eleven, timeout=0.2)
-        with pytest.raises(ReadTimeout):
+        with pytest.raises(ComparisonFailed):
             one.wait_until(one.signals.Measured, twenty_two, timeout=0.2)
 
 

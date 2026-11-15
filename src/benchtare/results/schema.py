@@ -25,7 +25,7 @@ from pathlib import Path
 from benchtare import __version__
 from benchtare.errors import BenchTareError
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Version 1. Each later version adds a migration below instead of changing these.
 TABLES_V1 = (
@@ -166,9 +166,29 @@ TABLES_V1 = (
     "CREATE INDEX record_entries_signal ON record_entries (signal, at)",
 )
 
-# MIGRATIONS[n] upgrades a database from version n to version n + 1.
+
+def _v1_to_v2(db: sqlite3.Connection) -> None:
+    """Version 2 (M6), the test check: each test's result under each corruption mode, its
+    verdict, and for each test file in a manifest when it was last checked."""
+    db.execute(
+        """CREATE TABLE test_checks (
+            run_id TEXT NOT NULL REFERENCES runs (id),
+            test_seq INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            PRIMARY KEY (run_id, test_seq, mode)
+        )"""
+    )
+    db.execute("ALTER TABLE test_results ADD COLUMN check_verdict TEXT")
+    db.execute("ALTER TABLE manifest_files ADD COLUMN last_checked_at TEXT")
+    db.execute("ALTER TABLE manifest_files ADD COLUMN unchanged_since_check INTEGER")
+
+
+# MIGRATIONS[n] upgrades a database from version n to version n + 1. A new database is created
+# at version 1 and brought up through the same steps, so every database ends up the same.
 Migration = Callable[[sqlite3.Connection], None]
-MIGRATIONS: dict[int, Migration] = {}
+MIGRATIONS: dict[int, Migration] = {1: _v1_to_v2}
 
 BUSY_TIMEOUT_MS = 5000  # how long to wait for another run's write before giving up
 _RETRY_PAUSE = 0.02  # seconds between tries when SQLite answers "busy" without waiting

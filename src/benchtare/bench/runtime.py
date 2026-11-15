@@ -7,7 +7,13 @@ It routes each signal through the harness to its equipment and backend.
   most recent write. That suits request/response signals and states that have already settled.
 - ``wait_until(signal, expected, timeout)`` waits for a value that equals ``expected`` (or
   satisfies it, if it is a predicate). Use it to check how the DUT reacts: a DUT that reports
-  cyclically, or a sampled channel, can still deliver the old value just after a write.
+  cyclically, or a sampled channel, can still deliver the old value just after a write. Values
+  that arrive but never match fail the test like an ``assert`` (``ComparisonFailed``): the DUT
+  answered wrongly, or later than the timeout, which is the test's timing requirement. Only
+  when nothing arrives at all is it a ``ReadTimeout``.
+
+While the test check runs (``benchtare.testcheck``), ``corruption`` names the mode, and what the
+test reads is corrupted; the record shows both what arrived and what the test was given.
 
 Each call goes into the test record (``benchtare.record``) through ``recorder``, which the
 pytest plugin sets; so does anything unexpected a backend sees. With no recorder, unexpected
@@ -32,6 +38,7 @@ from benchtare.backends.base import (
     Backend,
     BenchError,
     Binding,
+    ComparisonFailed,
     EquipmentIdentity,
     ReadTimeout,
     ReceiveBuffer,
@@ -54,6 +61,7 @@ from benchtare.record import (
 )
 from benchtare.signals.model import Direction, Signal, SignalSet, SignalType
 from benchtare.sim.simulation import Simulation
+from benchtare.testcheck import SHIFT, STALE, shifted
 
 if TYPE_CHECKING:
     from typing_extensions import Self  # typing.Self needs Python 3.11
@@ -124,6 +132,10 @@ class Bench:
         self._identity: dict[str, str] = {}
         self._identity_values: list[IdentityValue] = []
         self._identity_notes: dict[str, str] = {}
+        # The test check: the mode corrupting what the test reads (None when off), and how many
+        # readings it has corrupted. The pytest plugin sets the mode for each test's body.
+        self.corruption: str | None = None
+        self.corrupted = 0
 
     @property
     def record_level(self) -> RecordLevel:
@@ -252,16 +264,24 @@ class Bench:
                 f"(on {binding.endpoint}){self._last_seen(binding.key)}",
                 hint=self._what_to_check(binding),
             )
+        applied, value = self._as_read(binding, item.value)
+        if applied:
+            self.corrupted += 1
         self._note(
             RecordEntry(
                 READ,
                 RecordLevel.RESULTS,
-                f"read {binding.key} = {_shown(binding, item.value)} on {binding.endpoint} "
-                f"after {waited:.3f} s",
-                {**_facts(binding, item.value), "outcome": "value", "waited": waited},
+                f"read {binding.key} = {_shown(binding, value)} on {binding.endpoint} "
+                f"after {waited:.3f} s{self._corrupted_note(binding, item.value, applied)}",
+                {
+                    **_facts(binding, value),
+                    "outcome": "value",
+                    "waited": waited,
+                    **self._corrupted_facts(item.value, applied),
+                },
             )
         )
-        return item.value
+        return value
 
     def wait_until(
         self,
@@ -280,17 +300,22 @@ class Bench:
         want = getattr(expected, "__name__", None) if _is_predicate(expected) else None
         expecting = want or repr(expected)
         started = time.monotonic()
-        item = self._buffer.wait_for_match(binding.key, matches, timeout)
+        item = self._buffer.wait_for_match(
+            binding.key, lambda value: matches(self._as_read(binding, value)[1]), timeout
+        )
         waited = time.monotonic() - started
         if item is None:
+            arrived = self._buffer.since_write(binding.key)
+            if arrived:
+                self._not_reached(binding, expecting, timeout, arrived)
             last = self._buffer.last(binding.key)
-            seen = f"last value {_shown(binding, last.value)}" if last else "nothing received"
+            seen = f"; last value {_shown(binding, last.value)}, from earlier" if last else ""
             self._note(
                 RecordEntry(
                     WAIT,
                     RecordLevel.RESULTS,
-                    f"wait_until {binding.key}, expecting {expecting}: not reached within "
-                    f"{timeout:g} s on {binding.endpoint}; {seen}",
+                    f"wait_until {binding.key}, expecting {expecting}: nothing arrived within "
+                    f"{timeout:g} s on {binding.endpoint}{seen}",
                     {
                         **_facts(binding, last.value if last else None),
                         "expected": expecting,
@@ -300,25 +325,82 @@ class Bench:
                 )
             )
             raise ReadTimeout(
-                f"{binding.key} did not reach {expecting} within {timeout:g} s "
-                f"(on {binding.endpoint}){self._last_seen(binding.key)}",
+                f"no value of {binding.key} arrived within {timeout:g} s after the last write "
+                f"(on {binding.endpoint}), so it couldn't reach {expecting}"
+                f"{self._last_seen(binding.key)}",
                 hint=self._what_to_check(binding),
             )
+        applied, value = self._as_read(binding, item.value)
+        if applied:
+            self.corrupted += 1
         self._note(
             RecordEntry(
                 WAIT,
                 RecordLevel.RESULTS,
                 f"wait_until {binding.key}, expecting {expecting}: got "
-                f"{_shown(binding, item.value)} on {binding.endpoint} after {waited:.3f} s",
+                f"{_shown(binding, value)} on {binding.endpoint} after {waited:.3f} s"
+                f"{self._corrupted_note(binding, item.value, applied)}",
                 {
-                    **_facts(binding, item.value),
+                    **_facts(binding, value),
                     "expected": expecting,
                     "outcome": "reached",
                     "waited": waited,
+                    **self._corrupted_facts(item.value, applied),
                 },
             )
         )
-        return item.value
+        return value
+
+    def _not_reached(
+        self, binding: Binding, expecting: str, timeout: float, arrived: list[Received]
+    ) -> None:
+        """Values arrived but none matched: record it, and fail the test like an ``assert``."""
+        __tracebackhide__ = True
+        applied, value = self._as_read(binding, arrived[-1].value)
+        if applied:
+            self.corrupted += 1
+        count = f"{len(arrived)} value{'' if len(arrived) == 1 else 's'}"
+        self._note(
+            RecordEntry(
+                WAIT,
+                RecordLevel.RESULTS,
+                f"wait_until {binding.key}, expecting {expecting}: not reached within "
+                f"{timeout:g} s on {binding.endpoint}; {count} arrived, the last "
+                f"{_shown(binding, value)}{self._corrupted_note(binding, arrived[-1].value, applied)}",
+                {
+                    **_facts(binding, value),
+                    "expected": expecting,
+                    "outcome": "not reached",
+                    "timeout": timeout,
+                    "arrived": len(arrived),
+                    **self._corrupted_facts(arrived[-1].value, applied),
+                },
+            )
+        )
+        since = "after the last write" if self._buffer.written else "since the bench opened"
+        raise ComparisonFailed(
+            f"{binding.key} did not reach {expecting} within {timeout:g} s (on "
+            f"{binding.endpoint}): {count} arrived {since}, the last {_shown(binding, value)}"
+        )
+
+    def _as_read(self, binding: Binding, value: Any) -> tuple[bool, Any]:
+        """What the test is given for a value that arrived: the value itself or, while the test
+        check runs, the corrupted value; and whether it was corrupted."""
+        mode = self.corruption
+        if mode == SHIFT:
+            return shifted(binding.signal, value)
+        if mode == STALE:
+            before = self._buffer.before_write(binding.key)
+            return (True, before.value) if before is not None else (False, value)
+        return False, value
+
+    def _corrupted_note(self, binding: Binding, received: Any, applied: bool) -> str:
+        if not applied:
+            return ""
+        return f" (test check, {self.corruption}: {_shown(binding, received)} arrived)"
+
+    def _corrupted_facts(self, received: Any, applied: bool) -> dict[str, Any]:
+        return {"check": self.corruption, "received": received} if applied else {}
 
     # --- the DUT's identity -----------------------------------------------------------------
 

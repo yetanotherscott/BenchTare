@@ -177,10 +177,14 @@ def test_failed_check_is_a_failure_with_a_clean_message(project):
     result.stdout.fnmatch_lines(
         [
             "*bench.wait_until(signals.Measured, pytest.approx(99.0*",
-            "*Measured did not reach 99.0 ± * within 0.3 s (on io.in1); last value 42.0*",
-            "*Check: the DUT is powered and connected at io.in1*",
+            (
+                "E *ComparisonFailed: Measured did not reach 99.0 ± * within 0.3 s (on io.in1): "
+                "* arrived after the last write, the last 42.0 degC"
+            ),
         ]
     )
+    # The DUT answered, so there's no wiring to check.
+    assert "Check: the DUT is powered" not in result.stdout.str()
     assert "bench/runtime.py" not in result.stdout.str()  # BenchTare's own frames are hidden
 
 
@@ -491,7 +495,7 @@ def test_a_failed_test_shows_its_record(project):
             "??:??:??.??? write Setpoint = 42.0 degC on io.out1",
             (
                 "??:??:??.??? wait_until Measured, expecting 99.0 ± *: not reached within 0.3 s on "
-                "io.in1; last value 42.0 degC"
+                "io.in1; * arrived, the last 42.0 degC"
             ),
             "??:??:??.??? call failed: *Measured did not reach 99.0*",
         ]

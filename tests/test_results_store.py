@@ -17,6 +17,7 @@ from benchtare.results.manifest import ManifestFile
 from benchtare.results.schema import SCHEMA_VERSION, ResultsError, open_database
 from benchtare.results.store import RunInfo, SQLiteStore, TestResult, utc
 from benchtare.selftest import CheckResult, SelfTestResult
+from benchtare.testcheck import ModeResult
 
 TABLES = {
     "meta",
@@ -30,7 +31,9 @@ TABLES = {
     "selftest_checks",
     "test_results",
     "record_entries",
+    "test_checks",  # version 2
 }
+NEXT = SCHEMA_VERSION + 1  # a stand-in for the next version, to test upgrading in general
 
 
 def run_info(run_id="run-1", **changes):
@@ -73,9 +76,9 @@ def tables(db):
 def test_a_new_database_is_created_at_the_current_version(path):
     db = open_database(path)
     assert tables(db) == TABLES
-    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 1
+    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
     meta = dict(db.execute("SELECT key, value FROM meta"))
-    assert meta["schema_version"] == "1"
+    assert meta["schema_version"] == "2"
     assert meta["created_by"].startswith("benchtare ")
     db.close()
 
@@ -158,6 +161,14 @@ def store_a_whole_run(store, run_id, *, finish=True):
         run_id, [RecordEntry("read", RecordLevel.RESULTS, "r", read)], phase="call", test_seq=1
     )
     store.add_identity(run_id, [IdentityValue("software", "102", "signal", True, now)])
+    shifted = {**read, "value": 84.0, "check": "shift", "received": 42.0}
+    store.add_checks(
+        run_id,
+        1,
+        f"verdict of {run_id}",  # different in each run, so a write to another run shows
+        [ModeResult("shift", "failed", "assert 84.0 == 42.0")],
+        {"shift": {"call": [RecordEntry("read", RecordLevel.RESULTS, "r", shifted)]}},
+    )
     if finish:
         store.finish_run(run_id, status="finished", exit_code=1, counts={"failed": 1})
 
@@ -188,6 +199,60 @@ def test_a_run_id_already_stored_is_refused_not_overwritten(store):
     with pytest.raises(ResultsError, match="UNIQUE constraint failed"):
         store.start_run(run_info("run-1", dut="second"))
     assert store.db.execute("SELECT dut FROM runs").fetchall() == [("first",)]
+
+
+# --- the test check -----------------------------------------------------------------------------
+
+
+def test_a_tests_check_is_stored_with_its_verdict_modes_and_reruns(store):
+    store.start_run(run_info(kind="check-tests"))
+    store.add_test("run-1", TestResult(1, "t.py::a", "t.py", "passed", time.time()))
+    store.add_record("run-1", [RecordEntry("result", RecordLevel.RESULTS, "ok", {})], phase="call")
+    shifted = {"signal": "Measured", "value": 84.0, "check": "shift", "received": 42.0}
+    store.add_checks(
+        "run-1",
+        1,
+        "unable to fail",
+        [
+            ModeResult("shift", "passed", "reading Measured 84.0 instead of 42.0"),
+            ModeResult("stale", "not applied", "nothing it read had a value from before"),
+        ],
+        {"shift": {"call": [RecordEntry("read", RecordLevel.RESULTS, "r", shifted)]}},
+    )
+    db = store.db
+    assert db.execute("SELECT check_verdict FROM test_results").fetchall() == [("unable to fail",)]
+    assert db.execute("SELECT mode, outcome FROM test_checks ORDER BY mode").fetchall() == [
+        ("shift", "passed"),
+        ("stale", "not applied"),
+    ]
+    rows = db.execute("SELECT seq, phase, value_num, data FROM record_entries ORDER BY seq")
+    assert [row[:3] for row in rows.fetchall()] == [(1, "call", None), (2, "shift call", 84.0)]
+
+
+def checked_file(store, run_id, kind, sha, *, dut="reference", finish=True):
+    store.start_run(run_info(run_id, kind=kind, dut=dut))
+    store.add_manifest_files(run_id, [ManifestFile("t.py", "test", sha, 1)])
+    if finish:
+        store.finish_run(run_id, status="finished", exit_code=0, counts={})
+
+
+def test_each_test_file_says_when_it_was_last_checked(store):
+    checked_file(store, "plain", "tests", "aa")
+    assert store.check_status("plain") == [("t.py", None, None)]  # never checked
+    checked_file(store, "check", "check-tests", "aa")
+    checked_file(store, "same", "tests", "aa")
+    checked_file(store, "changed", "tests", "bb")
+    checked_file(store, "other-dut", "tests", "aa", dut="another")
+    ((checked_at,),) = store.db.execute("SELECT started_at FROM runs WHERE id = 'check'")
+    assert store.check_status("same") == [("t.py", checked_at, True)]
+    assert store.check_status("changed") == [("t.py", checked_at, False)]
+    assert store.check_status("other-dut") == [("t.py", None, None)]
+
+
+def test_a_check_that_never_finished_doesnt_count(store):
+    checked_file(store, "check", "check-tests", "aa", finish=False)
+    checked_file(store, "after", "tests", "aa")
+    assert store.check_status("after") == [("t.py", None, None)]
 
 
 # --- refusing what can't be used -------------------------------------------------------------------
@@ -270,21 +335,71 @@ def add_notes_table(db):
     db.execute("CREATE TABLE notes (run_id TEXT, note TEXT)")
 
 
+def upgrade_to_next(monkeypatch, step):
+    """Make this BenchTare one version newer, with ``step`` as its upgrade."""
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", NEXT)
+    monkeypatch.setattr(schema, "MIGRATIONS", {**schema.MIGRATIONS, SCHEMA_VERSION: step})
+
+
 def test_an_older_database_is_backed_up_and_migrated(path, monkeypatch):
     store = SQLiteStore(path)
     store.start_run(run_info())
     store.close()
-    monkeypatch.setattr(schema, "SCHEMA_VERSION", 2)
-    monkeypatch.setattr(schema, "MIGRATIONS", {1: add_notes_table})
+    upgrade_to_next(monkeypatch, add_notes_table)
     db = schema.open_database(path)
     assert "notes" in tables(db)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == 2
-    assert dict(db.execute("SELECT key, value FROM meta"))["schema_version"] == "2"
+    assert db.execute("PRAGMA user_version").fetchone()[0] == NEXT
+    assert dict(db.execute("SELECT key, value FROM meta"))["schema_version"] == str(NEXT)
     assert db.execute("SELECT id FROM runs").fetchall() == [("run-1",)]  # data kept
     db.close()
-    backup = sqlite3.connect(path.with_name("results.sqlite3.v1.bak"))
-    assert backup.execute("PRAGMA user_version").fetchone()[0] == 1
+    backup = sqlite3.connect(path.with_name(f"results.sqlite3.v{SCHEMA_VERSION}.bak"))
+    assert backup.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert backup.execute("SELECT id FROM runs").fetchall() == [("run-1",)]
+    backup.close()
+
+
+def version_1_database(path, monkeypatch):
+    """A results database as schema version 1 left it, with a run in it."""
+    with monkeypatch.context() as old:
+        old.setattr(schema, "SCHEMA_VERSION", 1)
+        old.setattr(schema, "MIGRATIONS", {})
+        db = schema.open_database(path)
+        db.execute(
+            "INSERT INTO runs (id, kind, status, started_at, schema_version, record_level, dut, "
+            "bench, harness, benchtare_version, pytest_version, args) VALUES ('old', 'tests', "
+            "'finished', '2026-11-01T00:00:00.000000Z', 1, 'stimuli', 'reference', 'b', 'h', "
+            "'0.0.1', '9.2', '[]')"
+        )
+        db.execute(
+            "INSERT INTO test_results (run_id, seq, nodeid, file, outcome, started_at) VALUES "
+            "('old', 1, 't.py::a', 't.py', 'passed', '2026-11-01T00:00:00.000000Z')"
+        )
+        db.execute(
+            "INSERT INTO manifest_files (run_id, path, role, sha256, size) VALUES "
+            "('old', 't.py', 'test', 'aa', 2)"
+        )
+        db.close()
+
+
+def test_a_version_1_database_is_upgraded_to_version_2_keeping_its_runs(path, monkeypatch):
+    version_1_database(path, monkeypatch)
+    before = sqlite3.connect(path)
+    assert schema.schema_version(before) == 1
+    assert "test_checks" not in tables(before)
+    before.close()
+    store = SQLiteStore(path)
+    assert schema.schema_version(store.db) == 2
+    assert "test_checks" in tables(store.db)
+    assert store.db.execute(
+        "SELECT nodeid, outcome, check_verdict FROM test_results"
+    ).fetchall() == [("t.py::a", "passed", None)]
+    assert store.db.execute(
+        "SELECT path, last_checked_at, unchanged_since_check FROM manifest_files"
+    ).fetchall() == [("t.py", None, None)]
+    store.start_run(run_info("new"))  # and a new run can be stored in it
+    store.close()
+    backup = sqlite3.connect(path.with_name("results.sqlite3.v1.bak"))
+    assert schema.schema_version(backup) == 1
     backup.close()
 
 
@@ -295,14 +410,13 @@ def test_a_failed_migration_leaves_the_database_unchanged(path, monkeypatch):
         db.execute("CREATE TABLE notes (note TEXT)")
         raise RuntimeError("disk on fire")
 
-    monkeypatch.setattr(schema, "SCHEMA_VERSION", 2)
-    monkeypatch.setattr(schema, "MIGRATIONS", {1: broken})
+    upgrade_to_next(monkeypatch, broken)
     with pytest.raises(ResultsError) as info:
         schema.open_database(path)
     assert "couldn't upgrade results database" in str(info.value)
     assert "RuntimeError: disk on fire. It is unchanged, and a copy is in" in str(info.value)
     db = sqlite3.connect(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert "notes" not in tables(db)
     db.close()
 
@@ -354,8 +468,7 @@ def test_busy_means_the_whole_timeout_went_by(path, monkeypatch):
 def test_a_database_another_program_holds_says_so(path, monkeypatch):
     open_database(path).close()
     monkeypatch.setattr(schema, "BUSY_TIMEOUT_MS", 100)
-    monkeypatch.setattr(schema, "SCHEMA_VERSION", 2)  # so opening it needs the write lock
-    monkeypatch.setattr(schema, "MIGRATIONS", {1: add_notes_table})
+    upgrade_to_next(monkeypatch, add_notes_table)  # so opening it needs the write lock
     other = sqlite3.connect(path, isolation_level=None)
     other.execute("BEGIN IMMEDIATE")  # a database browser with unsaved changes, say
     try:
@@ -373,7 +486,7 @@ def test_a_database_another_program_holds_says_so(path, monkeypatch):
         "another BenchTare run upgrading it, and run again; or point --results" in message
     )
     db = sqlite3.connect(path)
-    assert schema.schema_version(db) == 1  # not upgraded
+    assert schema.schema_version(db) == SCHEMA_VERSION  # not upgraded
     db.close()
 
 
@@ -456,8 +569,8 @@ if mode == "upgrade":  # this BenchTare is a version newer, with an upgrade that
         time.sleep(0.2)
         db.execute("CREATE TABLE notes (run_id TEXT, note TEXT)")
 
-    schema.SCHEMA_VERSION = 2
-    schema.MIGRATIONS = {1: add_notes}
+    schema.MIGRATIONS = {**schema.MIGRATIONS, schema.SCHEMA_VERSION: add_notes}
+    schema.SCHEMA_VERSION += 1
 
 (ready / name).touch()
 deadline = time.monotonic() + 60
@@ -532,12 +645,12 @@ def test_runs_upgrading_an_older_database_together_upgrade_it_once(tmp_path, pat
     store.close()
     assert run_together(tmp_path, path, mode="upgrade") == [(0, "")] * 4
     db = sqlite3.connect(path)
-    assert schema.schema_version(db) == 2
+    assert schema.schema_version(db) == NEXT
     assert "notes" in tables(db)
     assert db.execute("SELECT count(*) FROM runs").fetchone() == (5,)  # run-1 kept, plus 4
     db.close()
-    backup = sqlite3.connect(path.with_name("results.sqlite3.v1.bak"))
-    assert schema.schema_version(backup) == 1  # the file as it was before the upgrade
+    backup = sqlite3.connect(path.with_name(f"results.sqlite3.v{SCHEMA_VERSION}.bak"))
+    assert schema.schema_version(backup) == SCHEMA_VERSION  # the file before the upgrade
     assert backup.execute("SELECT id FROM runs").fetchall() == [("run-1",)]
     backup.close()
 

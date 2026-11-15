@@ -26,10 +26,13 @@ from benchtare.record import RecordEntry
 from benchtare.results.manifest import ManifestFile
 from benchtare.results.schema import SCHEMA_VERSION, open_database, transaction, write_failed
 from benchtare.selftest import SelfTestResult
+from benchtare.testcheck import ModeResult
 
 RUNNING = "running"
 FINISHED = "finished"
 STOPPED = "stopped"
+
+TEST_CHECK = "check-tests"  # the kind of a run of the test check
 
 # Facts of a record entry that get columns of their own; the rest go in ``data``.
 _ENTRY_COLUMNS = ("signal", "endpoint", "unit", "value")
@@ -98,6 +101,23 @@ class ResultStore(Protocol):
     ) -> None: ...
 
     def add_identity(self, run_id: str, values: Sequence[IdentityValue]) -> None: ...
+
+    def add_checks(
+        self,
+        run_id: str,
+        test_seq: int,
+        verdict: str,
+        results: Sequence[ModeResult],
+        records: Mapping[str, Mapping[str, Sequence[RecordEntry]]],
+    ) -> None:
+        """A test's verdict from the test check, its result under each mode, and the record of
+        each rerun (``records[mode][phase]``)."""
+        ...
+
+    def check_status(self, run_id: str) -> list[tuple[str, str | None, bool | None]]:
+        """Each test file in the run's manifest: its path, when it was last checked, and
+        whether it is unchanged since (None when never checked)."""
+        ...
 
     def finish_run(
         self, run_id: str, *, status: str, exit_code: int, counts: Mapping[str, int]
@@ -172,12 +192,38 @@ class SQLiteStore:
             )
 
     def add_manifest_files(self, run_id: str, files: Sequence[ManifestFile]) -> None:
+        """Store the manifest. For each test file, also when the test check last ran on it
+        (the latest finished check run of the same DUT, before this run) and whether the file
+        is unchanged since."""
+        rows = []
+        for f in files:
+            checked_at, unchanged = None, None
+            if f.role == "test":
+                last = self.db.execute(
+                    """SELECT r.started_at, m.sha256 FROM manifest_files m
+                    JOIN runs r ON r.id = m.run_id
+                    WHERE r.kind = ? AND r.status = ? AND m.path = ? AND r.id != ?
+                        AND r.dut = (SELECT dut FROM runs WHERE id = ?)
+                    ORDER BY r.started_at DESC LIMIT 1""",
+                    (TEST_CHECK, FINISHED, f.path, run_id, run_id),
+                ).fetchone()
+                if last is not None:
+                    checked_at, unchanged = last[0], int(last[1] == f.sha256)
+            rows.append((run_id, f.path, f.role, f.sha256, f.size, checked_at, unchanged))
         with self._write():
             self.db.executemany(
-                "INSERT OR IGNORE INTO manifest_files (run_id, path, role, sha256, size) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [(run_id, f.path, f.role, f.sha256, f.size) for f in files],
+                "INSERT OR IGNORE INTO manifest_files (run_id, path, role, sha256, size, "
+                "last_checked_at, unchanged_since_check) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
             )
+
+    def check_status(self, run_id: str) -> list[tuple[str, str | None, bool | None]]:
+        rows = self.db.execute(
+            "SELECT path, last_checked_at, unchanged_since_check FROM manifest_files "
+            "WHERE run_id = ? AND role = 'test' ORDER BY path",
+            (run_id,),
+        ).fetchall()
+        return [(path, at, None if same is None else bool(same)) for path, at, same in rows]
 
     def add_equipment(self, run_id: str, equipment: Sequence[Mapping[str, Any]]) -> None:
         with self._write():
@@ -287,6 +333,43 @@ class SQLiteStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
+
+    def add_checks(
+        self,
+        run_id: str,
+        test_seq: int,
+        verdict: str,
+        results: Sequence[ModeResult],
+        records: Mapping[str, Mapping[str, Sequence[RecordEntry]]],
+    ) -> None:
+        first = self._next_entry.get(run_id, 1)
+        entries = [
+            (mode, phase, entry)
+            for mode, phases in records.items()
+            for phase, phase_entries in phases.items()
+            for entry in phase_entries
+        ]
+        rows = [
+            _entry_row(run_id, first + i, test_seq, f"{mode} {phase}", entry)
+            for i, (mode, phase, entry) in enumerate(entries)
+        ]
+        with self._write():
+            self.db.execute(
+                "UPDATE test_results SET check_verdict = ? WHERE run_id = ? AND seq = ?",
+                (verdict, run_id, test_seq),
+            )
+            self.db.executemany(
+                "INSERT INTO test_checks (run_id, test_seq, mode, outcome, detail) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(run_id, test_seq, r.mode, r.outcome, r.detail) for r in results],
+            )
+            self.db.executemany(
+                """INSERT INTO record_entries (run_id, seq, test_seq, phase, at, kind, level,
+                    text, signal, endpoint, unit, value, value_num, data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+        self._next_entry[run_id] = first + len(rows)
 
     def finish_run(
         self, run_id: str, *, status: str, exit_code: int, counts: Mapping[str, int]

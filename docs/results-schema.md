@@ -1,16 +1,17 @@
 # Results schema
 
-**Status: version 1 is built (M5).** This is the schema the results database
-is created with, and the tables M6 and M8 will add, shown so that version 1
-leaves room for them. Changing it means a new version and a migration, never a
-silent change.
+**Status: version 2 is built (M6).** Version 1 (M5) is the schema below;
+version 2 adds the test check (see "Version 2" below), and M8 will add
+version 3. A new database is created at version 1 and brought up through the
+same migrations as an old one, so every database ends up the same. Changing it
+means a new version and a migration, never a silent change.
 
 ## What it has to serve
 
 | Who reads it | What they need |
 | --- | --- |
 | M5 | Each run, its manifest, each test's outcome, duration and test record, and the self-test result |
-| M6 | Each test check, per test and mode, and when each test file was last checked |
+| M6 | Each test check, per test and mode, and when each test file was last checked (version 2) |
 | M8 | The requirement IDs each test result covers |
 | Later: analysis (stage 6) | Pass rates and durations over time, and trends in measured values, so readings must be queryable, not only stored as text |
 | Later: remote database (stage 6) | Runs written locally can be copied to a shared database without ID clashes, so IDs are global and the SQL is plain |
@@ -292,14 +293,40 @@ The list is a minimum, not a limit:
   so a test can check a version like any other reading. BenchTare itself never
   judges them.
 
+## Version 2 (M6): the test check
+
+Migration 1 to 2 adds:
+
+- **`test_checks`**: one row per test and mode of a test check run (`runs.kind`
+  is `check-tests`).
+
+  | Column | Type | Notes |
+  | --- | --- | --- |
+  | `run_id` | TEXT, not null | |
+  | `test_seq` | INTEGER, not null | The test, as `test_results.seq` |
+  | `mode` | TEXT, not null | `shift` or `stale` |
+  | `outcome` | TEXT, not null | `failed` (the test can catch this fault), `passed`, `inconclusive` or `not applied` |
+  | `detail` | TEXT, not null | Why it failed, or what it read when it passed |
+
+  Primary key: `run_id, test_seq, mode`.
+- **`test_results.check_verdict`** (TEXT): `able to fail`, `unable to fail`,
+  `inconclusive` or `not checked`; null outside a test check run.
+- **`manifest_files.last_checked_at`** (TEXT) and
+  **`manifest_files.unchanged_since_check`** (INTEGER, 0 or 1), for test files:
+  when the latest finished test check of the same DUT ran on that path, and
+  whether the file's hash is the same now. Both null when it was never checked.
+- **Each rerun's record** goes into `record_entries` with the phase named after
+  the mode: `shift setup`, `shift call`, `shift teardown`, `stale call`, and so
+  on. A corrupted reading's `value` is what the test was given; `data` holds
+  `check` (the mode) and `received` (what arrived).
+
+Version 2 also tells two `wait_until` outcomes apart in `data.outcome`:
+`not reached` when values arrived but none matched (the test fails like an
+`assert`), and `timeout` when nothing arrived. In version 1 rows, `timeout`
+covers both.
+
 ## Later versions (designed now, built in their milestones)
 
-Each adds tables with a version bump and a migration, which also exercises the
-migration path early.
-
-- **Version 2, M6** — `test_checks`: `run_id`, `test_seq`, `mode` (`shift` or
-  `stale`), `outcome` (`failed`, `passed` or `timeout`), and per test a
-  verdict: able to fail or not.
 - **Version 3, M8** — `test_requirements`: `run_id`, `test_seq`,
   `requirement_id`.
 

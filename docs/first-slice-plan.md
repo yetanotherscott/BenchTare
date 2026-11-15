@@ -74,8 +74,7 @@ benchtare/
 │   │   └── harness-io.yaml  # every signal on simulated I/O, no CAN
 │   ├── selftest/
 │   │   └── checks.py        # bench check and harness check
-│   ├── testcheck/
-│   │   └── corrupt.py       # shift and stale corruption, can-fail report
+│   ├── testcheck.py         # the test check: corruption modes and verdicts
 │   ├── results/
 │   │   ├── schema.py        # the results schema, versioned
 │   │   ├── manifest.py      # versions and file hashes
@@ -302,20 +301,39 @@ bench gained a fifth input, `io.in5`, so the IO harness carries it too.
     stored; an added name is stored; a missing listed item is stored as
     missing and warned about.
 
-### M6: Test check
+### M6: Test check (done)
 
-- A corrupting wrapper around the `bench` fixture, with two modes: `shift` and
-  `stale`.
-- `pytest --check-tests` and `benchtare check-tests` rerun each test once per
-  mode. A test that still passes under every mode is reported as unable to
-  fail. Read timeouts don't count.
-- Store the results, and record in the manifest when each test file was last
-  checked and whether it has changed since.
+- `benchtare/testcheck.py`: the two modes, `shift` (a wrong value) and `stale`
+  (the value from before the most recent write), and the verdicts. The bench
+  corrupts what `read` and `wait_until` give the test while a mode is set; the
+  receive buffer keeps each value as it was before the most recent write.
+- `wait_until` tells a failed comparison from a timeout: values that arrived
+  but never matched raise `ComparisonFailed`, an `AssertionError`, and only
+  nothing arriving at all is a `ReadTimeout`. This applies to every run, not
+  only the test check, so a timeout set from a requirement is the test's timing
+  check.
+- `pytest --check-tests` and `benchtare check-tests` run each test as usual,
+  then rerun each one that passed once per mode, through pytest's own
+  `runtestprotocol`, with only the test's body corrupted. Verdicts: able to
+  fail, unable to fail (exit code 1), inconclusive (nothing arrived, staging
+  failed, or the test failed with nothing corrupted) and not checked.
+- Results schema version 2, the first real migration: `test_checks`,
+  `test_results.check_verdict`, and each test file's last check in
+  `manifest_files`. Each rerun's record is stored too. A usual run ends with a
+  line naming test files that were never checked or have changed since.
 - Tests:
   - a test with a real assertion is reported as able to fail;
-  - a test that asserts nothing, or ignores its reading, is reported as unable
-    to fail;
-  - a test that only times out isn't counted as able to fail.
+  - a test that ignores its reading, or accepts almost anything, is reported as
+    unable to fail, or shows the mode it passes;
+  - a rerun where nothing arrives, or that fails with nothing corrupted, is
+    inconclusive, not able to fail;
+  - staging reads real values, failing tests aren't rerun, and reruns aren't
+    counted as tests;
+  - a version 1 database is upgraded with its runs kept.
+- Decided during M6 (see the design brief): no ranges and no `late` mode. A
+  timeout set from the requirement is the timing check, boundary values belong
+  in tests, and ranges from standards plus boundary-value helpers are later
+  stages 7 and 13.
 
 ### M7: Scaffold and acceptance
 
@@ -374,6 +392,10 @@ Do not build these yet, even where the design brief describes them:
   stage 11). The first slice is tested on Linux, Windows and macOS: keep it
   portable, with no OS-specific calls and paths through `pathlib`.
 - Closed-loop or real-time simulation.
+- Ranges on signals, and helpers that generate boundary values from them
+  (design brief, later stages 7 and 13). The test check (M6) needs no ranges.
+- A test check that corrupts one signal at a time (design brief, later stage
+  13). M6 corrupts every reading in a test at once.
 
 ## Before the first release
 

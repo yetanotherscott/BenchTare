@@ -6,7 +6,14 @@ plugins, come later behind the same protocol (``benchtare.backends.base.Backend`
 
 from __future__ import annotations
 
-from benchtare.backends.base import Backend, BackendType, BenchError, ReadTimeout, WriteError
+from benchtare.backends.base import (
+    Backend,
+    BackendType,
+    BenchError,
+    ComparisonFailed,
+    ReadTimeout,
+    WriteError,
+)
 from benchtare.backends.sim import SimIO
 from benchtare.backends.sim_can import SimCan
 
@@ -17,6 +24,7 @@ __all__ = [
     "Backend",
     "BackendType",
     "BenchError",
+    "ComparisonFailed",
     "ReadTimeout",
     "SimCan",
     "SimIO",

@@ -53,13 +53,16 @@ import uuid
 import warnings
 from collections import Counter
 from collections.abc import Callable, Generator, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _pytest.runner import runtestprotocol  # what plugins that rerun a test use
 
-from benchtare import __version__
+from benchtare import __version__, testcheck
 from benchtare._yaml import count
+from benchtare.backends.base import ReadTimeout
 from benchtare.bench.config import BenchConfig, load_bench_file
 from benchtare.bench.runtime import Bench
 from benchtare.dut.description import InterfaceDescription, load_interface_description
@@ -99,7 +102,14 @@ from benchtare.results.manifest import (
     shown_path,
 )
 from benchtare.results.schema import ResultsError
-from benchtare.results.store import FINISHED, STOPPED, RunInfo, SQLiteStore, TestResult
+from benchtare.results.store import (
+    FINISHED,
+    STOPPED,
+    TEST_CHECK,
+    RunInfo,
+    SQLiteStore,
+    TestResult,
+)
 from benchtare.selftest import SelfTestResult, could_not_open, run_selftest
 from benchtare.signals.model import SignalSet
 
@@ -120,6 +130,7 @@ _PATHS = pytest.StashKey[dict[str, Path]]()
 _LEVEL = pytest.StashKey[RecordLevel]()
 _RESULTS = pytest.StashKey["Path | None"]()
 _IDENTIFY = pytest.StashKey[list[tuple[str, str]]]()
+_SEQ = pytest.StashKey[int]()  # the test's place in the run's results
 
 DEFAULT_RESULTS = Path(".benchtare") / "results.sqlite3"
 
@@ -200,6 +211,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="run BenchTare's self-test of the bench and harness, then stop without running "
         "any test (this is what 'benchtare selftest' does)",
     )
+    group.addoption(
+        "--check-tests",
+        dest="benchtare_check_tests",
+        action="store_true",
+        default=False,
+        help="the test check: run the tests, then rerun each one that passed with what it "
+        "reads corrupted (shift, then stale), and report any that still pass, because they "
+        "can't fail (this is what 'benchtare check-tests' does)",
+    )
 
 
 def configured_paths(config: pytest.Config) -> dict[str, Path] | None:
@@ -273,10 +293,17 @@ def configured_identity(config: pytest.Config) -> list[tuple[str, str]]:
 
 def pytest_configure(config: pytest.Config) -> None:
     paths = configured_paths(config)
+    checking = config.getoption("benchtare_check_tests")
+    if checking and config.getoption("benchtare_selftest_only"):
+        raise pytest.UsageError(
+            "BenchTare: --check-tests and --selftest-only can't be used together: the self-test "
+            "runs before every test check anyway."
+        )
     if paths is None:
-        if config.getoption("benchtare_selftest_only"):
+        if config.getoption("benchtare_selftest_only") or checking:
+            what = "check" if checking else "self-test"
             raise pytest.UsageError(
-                "There's nothing to self-test: BenchTare isn't configured.\n"
+                f"There's nothing to {what}: BenchTare isn't configured.\n"
                 + NOT_CONFIGURED.split("\n", 1)[1]
             )
         return
@@ -304,11 +331,14 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         harness,
         config.stash[_LEVEL],
         selftest_only=bool(config.getoption("benchtare_selftest_only")),
+        check_tests=bool(config.getoption("benchtare_check_tests")),
         results=config.stash[_RESULTS],
         identify=config.stash[_IDENTIFY],
     )
     bench_session.start_run(config)
     config.pluginmanager.register(bench_session, SESSION_PLUGIN)
+    if bench_session.check_tests:
+        config.pluginmanager.register(_CheckRunner(bench_session), "benchtare-check-tests")
 
 
 # --- fixtures ------------------------------------------------------------------------------------
@@ -348,6 +378,7 @@ class BenchSession:
         level: RecordLevel = DEFAULT_LEVEL,
         *,
         selftest_only: bool = False,
+        check_tests: bool = False,
         results: Path | None = None,
         identify: Sequence[tuple[str, str]] = (),
     ) -> None:
@@ -356,6 +387,12 @@ class BenchSession:
         self.harness = harness
         self.level = level
         self.selftest_only = selftest_only
+        # The test check (benchtare.testcheck): the mode of the rerun in progress, if any, and
+        # each test's verdict so far.
+        self.check_tests = check_tests
+        self._checking: str | None = None
+        self.checked: list[CheckedTest] = []
+        self._check_status: list[tuple[str, str | None, bool | None]] = []
         self.bench: Bench | None = None
         self.selftest: SelfTestResult | None = None
         self.pretest_record: list[RecordEntry] = []
@@ -400,7 +437,7 @@ class BenchSession:
         commit, dirty = git_state(config.rootpath)
         run = RunInfo(
             id=run_id,
-            kind="selftest" if self.selftest_only else "tests",
+            kind="selftest" if self.selftest_only else TEST_CHECK if self.check_tests else "tests",
             started_at=self._started,
             record_level=self.level.label,
             dut=self.description.name,
@@ -485,7 +522,12 @@ class BenchSession:
         files += [(path, CONFTEST) for path in _conftest_files(config)]
         files += [(Path(item.path), TEST) for item in session.items]
         manifest = manifest_files(config.rootpath, files)
-        self._store("the manifest", lambda store, run: store.add_manifest_files(run, manifest))
+
+        def write(store: SQLiteStore, run: str) -> None:
+            store.add_manifest_files(run, manifest)
+            self._check_status = store.check_status(run)
+
+        self._store("the manifest", write)
 
     def _store_identity(self, *, stop: bool = True) -> None:
         """Store the identity values collected since last time."""
@@ -505,7 +547,7 @@ class BenchSession:
         if self.store is None:
             return
         self._test_seq += 1
-        seq = self._test_seq
+        seq = item.stash[_SEQ] = self._test_seq
         details = main.longreprtext if main is not None and not main.passed else ""
         teardown = reports.get("teardown")
         if teardown is not None and teardown.failed and teardown is not main:
@@ -644,6 +686,98 @@ class BenchSession:
             stop=False,
         )
 
+    # --- the test check ---------------------------------------------------------------------
+
+    def check_protocol(self, item: pytest.Item, nextitem: pytest.Item | None) -> bool:
+        """Run a test as usual, then, if it passed, once per corruption mode. Only the usual
+        run is reported and counted; the reruns give the test's verdict."""
+        ihook = item.ihook
+        ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
+        runtestprotocol(item, nextitem=nextitem, log=True)
+        if self.results_failure is not None:
+            self._stop_run()
+        normal, main = _outcome(item.stash.get(_REPORTS, {}))
+        uses_bench = "bench" in getattr(item, "fixturenames", ())
+        results: list[testcheck.ModeResult] = []
+        records: dict[str, dict[str, list[RecordEntry]]] = {}
+        if normal == "passed" and uses_bench and self.bench is not None:
+            for mode in testcheck.MODES:
+                results.append(self._rerun(item, nextitem, mode))
+                records[mode] = item.stash.get(_RECORD, {})
+        verdict = testcheck.verdict(normal, results)
+        why = "" if normal == "passed" else f"it {normal}" if main is not None else ""
+        if normal == "passed" and not uses_bench:
+            why = "it doesn't use the bench"
+        self.checked.append(CheckedTest(item.nodeid, normal, verdict, tuple(results), why))
+        seq = item.stash.get(_SEQ, None)
+        if seq is not None:
+            self._store(
+                f"the test check of {item.nodeid}",
+                lambda store, run: store.add_checks(run, seq, verdict, results, records),
+            )
+        ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+        return True
+
+    def _rerun(
+        self, item: pytest.Item, nextitem: pytest.Item | None, mode: str
+    ) -> testcheck.ModeResult:
+        assert self.bench is not None
+        item.stash[_REPORTS] = {}
+        item.stash[_RECORD] = {}
+        self.bench.corrupted = 0
+        self._checking = mode
+        try:
+            runtestprotocol(item, nextitem=nextitem, log=False)
+        finally:
+            self._checking = None
+        return _mode_result(
+            mode,
+            item.stash.get(_REPORTS, {}),
+            item.stash.get(_RECORD, {}).get("call", []),
+            self.bench.corrupted,
+        )
+
+    def _show_checks(self, reporter: Any) -> None:
+        reporter.write_sep("=", "BenchTare test check")
+        for test in self.checked:
+            if test.verdict == testcheck.ABLE:
+                failed = [r.mode for r in test.results if r.outcome == testcheck.FAILED]
+                reporter.write_line(f"{test.nodeid}: able to fail ({', '.join(failed)})")
+            elif test.verdict == testcheck.UNABLE:
+                reporter.write_line(f"{test.nodeid}: UNABLE TO FAIL", red=True, bold=True)
+            elif test.verdict == testcheck.UNKNOWN:
+                reporter.write_line(f"{test.nodeid}: inconclusive", yellow=True)
+            else:
+                reason = f", because {test.why}" if test.why else ""
+                reporter.write_line(f"{test.nodeid}: not checked{reason}")
+            for result in test.results:
+                if result.outcome != testcheck.FAILED or test.verdict != testcheck.ABLE:
+                    reporter.write_line(f"    {result.mode}: {result.outcome}, {result.detail}")
+        counts = Counter(test.verdict for test in self.checked)
+        order = (testcheck.ABLE, testcheck.UNABLE, testcheck.UNKNOWN, testcheck.NOT_CHECKED)
+        summary = ", ".join(f"{counts[v]} {v}" for v in order if counts[v])
+        reporter.write_line(f"Test check: {summary or 'no tests'}")
+
+    def _show_check_status(self, reporter: Any) -> None:
+        """For a usual run: which test files the test check hasn't covered as they are now."""
+        never = [path for path, at, _ in self._check_status if at is None]
+        changed = [path for path, at, same in self._check_status if at is not None and not same]
+        if not self._check_status:
+            return
+        if not never and not changed:
+            reporter.write_line(
+                "benchtare test check: every test file was checked, and none has changed since"
+            )
+            return
+        parts = []
+        if changed:
+            parts.append(f"changed since their last check: {', '.join(changed)}")
+        if never:
+            parts.append(f"never checked: {', '.join(never)}")
+        reporter.write_line(
+            f"benchtare test check: {'; '.join(parts)}. Run benchtare check-tests to check them."
+        )
+
     # --- hooks ----------------------------------------------------------------------------
 
     def pytest_report_header(self, config: pytest.Config) -> list[str]:
@@ -721,9 +855,18 @@ class BenchSession:
             entries = _phase_record(item, phase)
             entries.extend(self._pending)
             self._pending.clear()
+        # The test check corrupts what the test's body reads; staging and teardown read the
+        # real values, so the DUT is put into the same state for every rerun.
+        corrupting = phase == "call" and self._checking is not None and self.bench is not None
+        if corrupting:
+            assert self.bench is not None
+            self.bench.corruption = self._checking
         try:
             yield
         finally:
+            if corrupting:
+                assert self.bench is not None
+                self.bench.corruption = None
             with self._lock:
                 self._phase = None
                 unexpected = [entry for entry in entries if entry.unexpected]
@@ -765,6 +908,12 @@ class BenchSession:
             entries = snapshot.get(phase, [])
             if any(entry.kind != RESULT for entry in entries):
                 report.sections.append((f"BenchTare record {phase}", render(entries)))
+        if self._checking is not None:
+            # A rerun of the test check: judged by check_protocol, not stored as a test.
+            report.benchtare_nothing_arrived = call.excinfo is not None and (
+                call.excinfo.errisinstance(ReadTimeout)
+            )
+            return
         if call.when == "teardown":
             # A hook wrapper shouldn't raise, so a test that couldn't be stored stops the run in
             # pytest_runtest_logfinish, as soon as pytest has reported the test.
@@ -785,6 +934,10 @@ class BenchSession:
             # No tests were collected, which pytest would report as exit code 5.
             ok = self.selftest.passed
             session.exitstatus = pytest.ExitCode.OK if ok else pytest.ExitCode.TESTS_FAILED
+        unable = any(test.verdict == testcheck.UNABLE for test in self.checked)
+        if unable and session.exitstatus == pytest.ExitCode.OK:
+            # A test that can't fail fails the test check.
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
         stopped = session.exitstatus == pytest.ExitCode.INTERRUPTED
         self._finish_identity(stopped)
         status = STOPPED if stopped else FINISHED
@@ -804,12 +957,96 @@ class BenchSession:
             session.exitstatus = pytest.ExitCode.INTERRUPTED
         self.bench = None
 
-    def pytest_terminal_summary(self, terminalreporter: Any) -> None:
+    def pytest_terminal_summary(self, terminalreporter: Any, exitstatus: int) -> None:
         if self._after_last_test:
             terminalreporter.write_sep("-", "BenchTare record after the last test")
             terminalreporter.write_line(render(self._after_last_test))
+        if self.check_tests:
+            self._show_checks(terminalreporter)
+        elif self._counts and exitstatus != pytest.ExitCode.INTERRUPTED:
+            self._show_check_status(terminalreporter)  # only after tests ran to the end
         if self.results_failure is not None and not self._results_failure_shown:
             self._show_results_failure(stopped=False)
+
+
+@dataclass(frozen=True)
+class CheckedTest:
+    """One test's part in the test check."""
+
+    nodeid: str
+    outcome: str  # its usual outcome, as pytest's summary counts it
+    verdict: str  # testcheck.ABLE, UNABLE, UNKNOWN or NOT_CHECKED
+    results: tuple[testcheck.ModeResult, ...]
+    why: str = ""  # why it wasn't checked
+
+
+class _CheckRunner:
+    """Runs each test through the test check. Registered only with --check-tests."""
+
+    def __init__(self, session: BenchSession) -> None:
+        self.session = session
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_protocol(self, item: pytest.Item, nextitem: pytest.Item | None) -> bool:
+        return self.session.check_protocol(item, nextitem)
+
+
+def _mode_result(
+    mode: str,
+    reports: dict[str, pytest.TestReport],
+    call_record: Sequence[RecordEntry],
+    corrupted: int,
+) -> testcheck.ModeResult:
+    """How one rerun went: the test failed, passed, or proved nothing."""
+    setup, call = reports.get("setup"), reports.get("call")
+    if setup is None or not setup.passed or call is None:
+        why = _short_message(setup) if setup is not None else None
+        return testcheck.ModeResult(
+            mode, testcheck.INCONCLUSIVE, f"staging didn't pass on the rerun: {why or 'no report'}"
+        )
+    message = _short_message(call) or ""
+    if call.skipped:
+        return testcheck.ModeResult(mode, testcheck.INCONCLUSIVE, f"skipped: {message}")
+    if call.failed:
+        if getattr(call, "benchtare_nothing_arrived", False):
+            return testcheck.ModeResult(
+                mode, testcheck.INCONCLUSIVE, f"nothing arrived to corrupt: {message}"
+            )
+        if corrupted == 0:
+            return testcheck.ModeResult(
+                mode,
+                testcheck.INCONCLUSIVE,
+                f"failed with nothing corrupted, so the test may be flaky: {message}",
+            )
+        return testcheck.ModeResult(mode, testcheck.FAILED, message)
+    if corrupted == 0:
+        return testcheck.ModeResult(
+            mode,
+            testcheck.NOT_APPLIED,
+            "nothing it read had a value from before a write"
+            if mode == testcheck.STALE
+            else "nothing it read could be shifted",
+        )
+    readings = [_corrupted_reading(entry) for entry in call_record if "check" in entry.data]
+    return testcheck.ModeResult(mode, testcheck.PASSED, f"reading {'; '.join(readings)}")
+
+
+def _corrupted_reading(entry: RecordEntry) -> str:
+    """What a rerun gave the test instead of what arrived."""
+    unit = entry.data.get("unit")
+
+    def shown(value: Any) -> str:
+        return f"{value!r} {unit}" if unit else repr(value)
+
+    signal, given, arrived = (entry.data.get(key) for key in ("signal", "value", "received"))
+    if entry.data.get("check") == testcheck.STALE:
+        if given == arrived:
+            return (
+                f"{signal} {shown(given)} from before the write, the same as what arrived "
+                "after it, so it can't tell whether the DUT responded"
+            )
+        return f"{signal} {shown(given)} from before the write, not the {shown(arrived)} after it"
+    return f"{signal} {shown(given)} instead of the {shown(arrived)} that arrived"
 
 
 def _write(config: pytest.Config, line: str, **markup: bool) -> None:

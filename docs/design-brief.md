@@ -162,14 +162,15 @@ proposal.
 | 4 | Self-verification | Standard interface fault stimuli, such as dropped or stopped CAN messages; the shipped reference extended to cover each new backend and transport |
 | 5 | Requirements | ReqIF, StrictDoc and Sphinx-Needs importers; trace report |
 | 6 | Analysis | Remote database option; trends for pass rate, duration and measured values |
-| 7 | Protocols | CANopen and Modbus, each with a CI reference; J1939 and ISOBUS considered after that |
+| 7 | Protocols | CANopen and Modbus, each with a CI reference; J1939 and ISOBUS considered after that. Each standard brings the valid ranges and special values (such as "error" and "not available") it defines for its signals: tests can read them instead of retyping the standard, and an interface description can override them per signal |
 | 8 | Community | Backend and adapter guides; write-back adapters from contributors |
 | 9 | Test development in IDEs | Setup for writing and debugging tests in common IDEs, such as VS Code and PyCharm: schemas so the editor completes and checks interface descriptions, bench files and harness files; completion of signal names in tests; run and debug configurations; `benchtare init` writing them for a new project |
 | 10 | GUI | A graphical front end for people who don't live in a terminal, for example to run the self-test and tests, follow a run, and browse results and test records. It drives pytest and reads the results database; it doesn't replace either. Scope to be decided |
 | 11 | Platforms | Linux, Windows and macOS supported on real hardware as well as in simulation: hardware backends that work on each (SocketCAN, from stage 2, is Linux-only, so Windows and macOS need vendor CAN adapters through python-can's interfaces, such as PCAN or Kvaser); install and setup guides for each |
 | 12 | User guide | A comprehensive user guide with worked examples, beyond the README quickstart: recommended ways to do common things, built from the topics collected below |
+| 13 | Test design | Helpers for boundary tests: from a signal's range, given by a standard (stage 7) or by the engineer, whose range always wins, the classic values: above and below the range, its maximum and minimum, and seeded random values within it, with the seed stored in the run so a failure can be repeated. A finer test check that corrupts one signal at a time, to show which signals a test reads but never checks. Ranges only help write tests: BenchTare still never judges a reading by them |
 
-Stages 9 to 12 are on the horizon rather than planned in detail. None is
+Stages 9 to 13 are on the horizon rather than planned in detail. None is
 needed for the first slice, but the first slice shouldn't make them harder: the
 file formats, the CLI and the results schema are what they will build on. The
 first slice already runs on all three platforms: CI tests it on Linux, Windows
@@ -185,6 +186,13 @@ first slice is designed, kept here until the guide is written:
   the variable), or a session fixture in `conftest.py` can read them from
   environment variables and call `bench.identify(...)`. BenchTare never reads
   environment variables itself: the team's code chooses which to record.
+- **Timing requirements are timeouts.** Set each `wait_until` and `read`
+  timeout from the requirement, not from what is comfortable: a response that
+  arrives after the timeout fails the test, so the timeout is the timing check.
+  The test record keeps how long each response took, for trends.
+- **Boundary tests are ordinary tests.** Values above and below a range, at its
+  limits and in between come from the requirement or the standard, and go in
+  a parametrized test. The test check then proves each case can fail.
 
 ## Prior art
 

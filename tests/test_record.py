@@ -9,7 +9,7 @@ import can
 import pytest
 
 from benchtare import reference
-from benchtare.backends.base import ReadTimeout
+from benchtare.backends.base import ComparisonFailed, ReadTimeout
 from benchtare.bench.runtime import open_bench
 from benchtare.record import (
     EQUIPMENT_FAILURE,
@@ -122,9 +122,27 @@ def test_timeouts_are_recorded():
             bench.wait_until(bench.signals.Mode, "run", timeout=0.05)
     assert [e.text for e in entries] == [
         "read Measured: nothing within 0.05 s on can0",
-        "wait_until Mode, expecting 'run': not reached within 0.05 s on can0; nothing received",
+        "wait_until Mode, expecting 'run': nothing arrived within 0.05 s on can0",
     ]
     assert [e.data["outcome"] for e in entries] == ["timeout", "timeout"]
+
+
+def test_values_that_never_match_are_recorded_as_not_reached():
+    bench, entries = open_recorded(RecordLevel.RESULTS)
+    with bench:
+        bench.wait_until(bench.signals.Mode, "standby", timeout=2.0)
+        entries.clear()
+        with pytest.raises(ComparisonFailed):
+            bench.wait_until(bench.signals.Mode, "run", timeout=0.2)
+    (entry,) = entries
+    assert re.fullmatch(
+        r"wait_until Mode, expecting 'run': not reached within 0\.2 s on can0; \d+ values? "
+        r"arrived, the last 'standby'",
+        entry.text,
+    )
+    assert entry.data["outcome"] == "not reached"
+    assert entry.data["value"] == "standby"
+    assert entry.data["arrived"] >= 1
 
 
 # --- unexpected events are kept at every level ---------------------------------------------------

@@ -294,9 +294,20 @@ carries several signals and the DUT answers each frame. `read` is right for a
 state that has already settled, or a protocol where each request gets exactly
 one answer. To check a reaction, wait for it.
 
-A timeout raises an error. It names the signal, its channel and the timeout,
-gives the last value received and how long ago, and says what to check. If the
-equipment reports a fault, the error says that instead.
+**When the DUT answers wrongly, the test fails; when nothing arrives, it's a
+timeout.** These are reported differently, because they point at different
+things:
+
+- **Values arrived, but none was what `wait_until` expected in time.** The DUT
+  answered with the wrong value, or later than the timeout, and the test fails
+  like a failed `assert` (`ComparisonFailed`): "Measured did not reach 99.0 ±
+  0.5 within 0.3 s (on can0): 29 values arrived after the last write, the last
+  42.0 degC". Set each timeout from the requirement, and it is the test's
+  timing check: a response after it fails the test, whatever the reason.
+- **Nothing arrived at all** (`ReadTimeout`). The error names the signal, its
+  channel and the timeout, gives the last value received and how long ago, and
+  says what to check: wiring, the bus, whether the DUT is running. If the
+  equipment reports a fault, the error says that instead.
 
 Writing a DUT output, or reading a DUT input, is refused. Tests drive inputs and
 read outputs.
@@ -405,8 +416,8 @@ file.
 10:38:35.205 setup passed
 ---------------------------- BenchTare record call -----------------------------
 10:38:35.206 write Setpoint = 42.0 degC on can0
-10:38:35.506 wait_until Measured, expecting 99.0 ± 0.5: not reached within 0.3 s on can0; last value 42.0 degC
-10:38:35.531 call failed: benchtare.backends.base.ReadTimeout: Measured did not reach 99.0 ± 0.5 within 0.3 s (on can0); last value 42.0, 0.28 s ago
+10:38:35.506 wait_until Measured, expecting 99.0 ± 0.5: not reached within 0.3 s on can0; 29 values arrived, the last 42.0 degC
+10:38:35.531 call failed: benchtare.backends.base.ComparisonFailed: Measured did not reach 99.0 ± 0.5 within 0.3 s (on can0): 29 values arrived after the last write, the last 42.0 degC
 ```
 
 - **Each report carries its phase's record** as `report.benchtare_record`: a
@@ -502,23 +513,54 @@ wrong).
 
 ### The test check (on demand)
 
-A test that passes whatever the DUT does proves nothing. The test check reruns
-each test with its readings corrupted, and reports any test that still passes.
-It corrupts what the test reads, not the DUT, so it works for any DUT.
+A test that passes whatever the DUT does proves nothing. The test check runs
+the tests as usual, then reruns each test that passed once per mode, with what
+it reads corrupted, and reports any test that still passes. It corrupts what
+the test reads, not the DUT, so it works for any DUT, and it needs no ranges:
+any clearly wrong value proves that a check is doing something.
 
-| Mode | What the test reads instead |
-| --- | --- |
-| `shift` | A different value: numbers shifted, bools inverted, another enum value |
-| `stale` | The value from before the most recent write |
+| Mode | The DUT fault it stands for | What the test reads instead |
+| --- | --- | --- |
+| `shift` | A wrong value | A number moved by its own size (at least 1), a bool inverted, an enum's next state |
+| `stale` | The DUT ignored the command | The value from before the bench's most recent write |
 
-A test counts as able to fail if at least one mode makes it fail. Read timeouts
-don't count, because a timeout fails every test whether or not its assertions
-are any good.
+Only readings in the test's body are corrupted. Staging (setup) and teardown
+read the real values, so the DUT is put into the same state for each rerun.
 
-The test check roughly doubles run time, so it runs on demand (`benchtare
-check-tests` or `pytest --check-tests`), not every session. Its results are
-stored, and each manifest records when each test file was last checked and
-whether it has changed since.
+**Verdicts**, per test:
+
+- **Able to fail:** at least one mode made it fail. A mode it still passed is
+  listed, because it names a fault the test would miss: "shift: passed,
+  reading Measured 84.0 degC instead of the 42.0 degC that arrived" means its
+  check accepts a clearly wrong value.
+- **Unable to fail:** it passed under every mode that applied. The run's exit
+  code is 1, even though every test passed.
+- **Inconclusive:** a rerun proved nothing. Nothing arrived to corrupt (a
+  `ReadTimeout` fails every test, good or bad), staging failed on the rerun, or
+  the test failed with nothing corrupted, which suggests it is flaky.
+- **Not checked:** it didn't pass to begin with, doesn't use the bench, or read
+  nothing in its body that a mode could change.
+
+**Reruns follow each other,** so each starts with the DUT in the state the
+previous run left it in. A test whose staging doesn't set a starting state
+that differs from what the test asks for passes under `stale`: "reading
+Measured 42.0 degC from before the write, the same as what arrived after it,
+so it can't tell whether the DUT responded". That is the classic false pass at
+a bench: the DUT was already where the test expected it. A staging fixture
+that sets a known, different starting point fixes it.
+
+The test check takes about three times as long as a usual run, so it runs on
+demand (`benchtare check-tests` or `pytest --check-tests`), not every session.
+Its verdicts and each rerun's record are stored. Each run's manifest records
+when each test file was last checked and whether it has changed since, and a
+usual run ends with a line naming any test file that was never checked or has
+changed since its last check.
+
+Ranges are not needed here, and BenchTare doesn't know them. Boundary values
+(above, below, at the limits of a range) are stimuli for tests the engineer
+writes from the requirement; the test check then proves each one can fail.
+Ranges from protocol standards, and helpers that generate boundary values, are
+on the roadmap (design brief, later stages 7 and 13).
 
 ## Results and the manifest
 

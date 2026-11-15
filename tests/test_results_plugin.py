@@ -95,7 +95,7 @@ def test_each_test_is_stored_with_its_outcome(project):
         (2, "test_bench.py::test_misses", "test_bench.py", "failed", 1, 1, 1),
     ]
     ((message,),) = query(project, "SELECT message FROM test_results WHERE outcome = 'failed'")
-    assert message.startswith("benchtare.backends.base.ReadTimeout: Measured did not reach 99.0")
+    assert message.startswith("benchtare.backends.base.ComparisonFailed: Measured did not reach 99")
 
 
 def test_outcomes_follow_pytests_summary(project):
