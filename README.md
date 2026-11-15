@@ -15,7 +15,8 @@ hardware or simulation, and proves that its own results are reliable.
   plain pytest tests against named signals.
 - Before each run, the bench and harness check themselves: equipment healthy,
   loopbacks reading back, DUT present. If not, the run doesn't start.
-- On demand, BenchTare proves each test can fail by corrupting what it reads.
+- On demand, BenchTare proves each test can fail at every check, by corrupting what it
+  reads, one reading at a time.
 - The same tests run on a simulated bench or on real hardware.
 - Every run is recorded in a database with a manifest of what was tested.
 - Requirements are optional. When you have them, tests trace to them.

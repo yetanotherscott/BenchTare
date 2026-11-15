@@ -305,30 +305,39 @@ bench gained a fifth input, `io.in5`, so the IO harness carries it too.
 
 - `benchtare/testcheck.py`: the two modes, `shift` (a wrong value) and `stale`
   (the value from before the most recent write), and the verdicts. The bench
-  corrupts what `read` and `wait_until` give the test while a mode is set; the
-  receive buffer keeps each value as it was before the most recent write.
+  logs each reading a test's body takes as a verification step, with the test's
+  line, and corrupts one chosen step while a mode is set; the receive buffer
+  keeps each value as it was before the most recent write. `check=False` marks
+  a reading the test deliberately doesn't check.
 - `wait_until` tells a failed comparison from a timeout: values that arrived
   but never matched raise `ComparisonFailed`, an `AssertionError`, and only
   nothing arriving at all is a `ReadTimeout`. This applies to every run, not
   only the test check, so a timeout set from a requirement is the test's timing
   check.
 - `pytest --check-tests` and `benchtare check-tests` run each test as usual,
-  then rerun each one that passed once per mode, through pytest's own
-  `runtestprotocol`, with only the test's body corrupted. Verdicts: able to
-  fail, unable to fail (exit code 1), inconclusive (nothing arrived, staging
-  failed, or the test failed with nothing corrupted) and not checked.
-- Results schema version 2, the first real migration: `test_checks`,
-  `test_results.check_verdict`, and each test file's last check in
-  `manifest_files`. Each rerun's record is stored too. A usual run ends with a
-  line naming test files that were never checked or have changed since.
+  then walk through each one that passed: a control rerun with nothing
+  corrupted, which must pass and take the same readings, then one rerun per
+  reading and mode with only that reading corrupted, through pytest's own
+  `runtestprotocol`. A test can fail only if every checked reading can (exit
+  code 1 otherwise). A rerun's failure counts only if it happened at or after
+  the corrupted step with something corrupted; anything else is inconclusive
+  with the reason, so every failure counted is real.
+- Results schema version 2, the first real migration: `test_checks` (per
+  rerun: reading, signal, location, mode, outcome), `test_results.check_verdict`,
+  and each test file's last check in `manifest_files`. Each rerun's record is
+  stored too. A usual run ends with a line naming test files that were never
+  checked or have changed since.
 - Tests:
-  - a test with a real assertion is reported as able to fail;
-  - a test that ignores its reading, or accepts almost anything, is reported as
-    unable to fail, or shows the mode it passes;
-  - a rerun where nothing arrives, or that fails with nothing corrupted, is
-    inconclusive, not able to fail;
-  - staging reads real values, failing tests aren't rerun, and reruns aren't
-    counted as tests;
+  - a test with a real check at every step is reported as able to fail;
+  - a test with one unchecked step, one that ignores its reading, or one that
+    accepts almost anything, is reported as unable to fail at that step, or
+    shows the mode it passes;
+  - a failure before the corrupted step, a failure with nothing corrupted, a
+    rerun where nothing arrives, a test that doesn't repeat and one that takes
+    different readings are all inconclusive, never able to fail;
+  - a failure caught at a later step counts, and says where;
+  - staging reads real values, failing tests aren't rerun, reruns aren't
+    counted as tests, and `check=False` readings are left out;
   - a version 1 database is upgraded with its runs kept.
 - Decided during M6 (see the design brief): no ranges and no `late` mode. A
   timeout set from the requirement is the timing check, boundary values belong
@@ -394,8 +403,6 @@ Do not build these yet, even where the design brief describes them:
 - Closed-loop or real-time simulation.
 - Ranges on signals, and helpers that generate boundary values from them
   (design brief, later stages 7 and 13). The test check (M6) needs no ranges.
-- A test check that corrupts one signal at a time (design brief, later stage
-  13). M6 corrupts every reading in a test at once.
 
 ## Before the first release
 

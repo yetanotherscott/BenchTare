@@ -12,8 +12,11 @@ It routes each signal through the harness to its equipment and backend.
   answered wrongly, or later than the timeout, which is the test's timing requirement. Only
   when nothing arrives at all is it a ``ReadTimeout``.
 
-While the test check runs (``benchtare.testcheck``), ``corruption`` names the mode, and what the
-test reads is corrupted; the record shows both what arrived and what the test was given.
+Each reading a test takes is a verification step. ``readings`` logs them, with the test's line
+that took each; ``check=False`` marks one the test deliberately doesn't check, such as a value
+kept only for trends. While the test check runs (``benchtare.testcheck``), ``corruption`` names
+the mode and ``corrupt_at`` the step it corrupts; the record shows both what arrived and what
+the test was given.
 
 Each call goes into the test record (``benchtare.record``) through ``recorder``, which the
 pytest plugin sets; so does anything unexpected a backend sees. With no recorder, unexpected
@@ -24,6 +27,7 @@ See docs/model.md.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import numbers
@@ -31,6 +35,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from benchtare.backends import BACKENDS
@@ -61,7 +66,7 @@ from benchtare.record import (
 )
 from benchtare.signals.model import Direction, Signal, SignalSet, SignalType
 from benchtare.sim.simulation import Simulation
-from benchtare.testcheck import SHIFT, STALE, shifted
+from benchtare.testcheck import SHIFT, STALE, Reading, shifted
 
 if TYPE_CHECKING:
     from typing_extensions import Self  # typing.Self needs Python 3.11
@@ -82,6 +87,9 @@ _IDENTITY_FIELDS = (
 # The key under which Bench.check() lists the simulation's own problems. It has a space, so it
 # can never be an equipment name.
 SIMULATION = "simulated DUT"
+
+# BenchTare's own code, which a reading's location skips to find the test's line.
+_PACKAGE = os.path.normcase(str(Path(__file__).resolve().parents[1])) + os.sep
 
 
 def open_bench(
@@ -132,10 +140,12 @@ class Bench:
         self._identity: dict[str, str] = {}
         self._identity_values: list[IdentityValue] = []
         self._identity_notes: dict[str, str] = {}
-        # The test check: the mode corrupting what the test reads (None when off), and how many
-        # readings it has corrupted. The pytest plugin sets the mode for each test's body.
+        # The readings taken (the pytest plugin clears them for each test's body) and, for the
+        # test check, the mode corrupting them (None when off) and which checked reading it
+        # corrupts, numbered from 1 (None for every one).
+        self.readings: list[Reading] = []
         self.corruption: str | None = None
-        self.corrupted = 0
+        self.corrupt_at: int | None = None
 
     @property
     def record_level(self) -> RecordLevel:
@@ -242,11 +252,18 @@ class Bench:
         with self._buffer.writing():
             backend.write(binding, value)
 
-    def read(self, signal: Signal | str, timeout: float = DEFAULT_TIMEOUT) -> Any:
-        """Return the first value of a DUT output received after the most recent write."""
+    def read(
+        self, signal: Signal | str, timeout: float = DEFAULT_TIMEOUT, *, check: bool = True
+    ) -> Any:
+        """Return the first value of a DUT output received after the most recent write.
+
+        ``check=False`` says the test doesn't check this value on purpose, such as a
+        measurement kept only for trends; the test check then leaves it alone.
+        """
         __tracebackhide__ = True
         binding = self._readable(signal)
         _check_timeout(timeout)
+        reading = self._start_reading(binding, check)
         started = time.monotonic()
         item = self._buffer.first_after_write(binding.key, timeout)
         waited = time.monotonic() - started
@@ -256,7 +273,12 @@ class Bench:
                     READ,
                     RecordLevel.RESULTS,
                     f"read {binding.key}: nothing within {timeout:g} s on {binding.endpoint}",
-                    {**_facts(binding, None), "outcome": "timeout", "timeout": timeout},
+                    {
+                        **_facts(binding, None),
+                        "outcome": "timeout",
+                        "timeout": timeout,
+                        **_step_facts(reading),
+                    },
                 )
             )
             raise ReadTimeout(
@@ -264,9 +286,8 @@ class Bench:
                 f"(on {binding.endpoint}){self._last_seen(binding.key)}",
                 hint=self._what_to_check(binding),
             )
-        applied, value = self._as_read(binding, item.value)
-        if applied:
-            self.corrupted += 1
+        applied, value = self._as_read(binding, item.value, reading)
+        self._settle(binding, reading, item.value, applied)
         self._note(
             RecordEntry(
                 READ,
@@ -277,6 +298,7 @@ class Bench:
                     **_facts(binding, value),
                     "outcome": "value",
                     "waited": waited,
+                    **_step_facts(reading),
                     **self._corrupted_facts(item.value, applied),
                 },
             )
@@ -288,12 +310,19 @@ class Bench:
         signal: Signal | str,
         expected: Any,
         timeout: float = DEFAULT_TIMEOUT,
+        *,
+        check: bool = True,
     ) -> Any:
         """Wait for a value of a DUT output, received after the most recent write, that equals
-        ``expected``, or for which ``expected`` returns true if it is a function. Return it."""
+        ``expected``, or for which ``expected`` returns true if it is a function. Return it.
+
+        ``check=False`` says this wait isn't one of the test's checks, such as waiting for the
+        DUT to settle before the real stimulus; the test check then leaves it alone.
+        """
         __tracebackhide__ = True
         binding = self._readable(signal)
         _check_timeout(timeout)
+        reading = self._start_reading(binding, check)
         matches: Callable[[Any], bool] = (
             expected if _is_predicate(expected) else (lambda value: value == expected)
         )
@@ -301,13 +330,13 @@ class Bench:
         expecting = want or repr(expected)
         started = time.monotonic()
         item = self._buffer.wait_for_match(
-            binding.key, lambda value: matches(self._as_read(binding, value)[1]), timeout
+            binding.key, lambda value: matches(self._as_read(binding, value, reading)[1]), timeout
         )
         waited = time.monotonic() - started
         if item is None:
             arrived = self._buffer.since_write(binding.key)
             if arrived:
-                self._not_reached(binding, expecting, timeout, arrived)
+                self._not_reached(binding, expecting, timeout, arrived, reading)
             last = self._buffer.last(binding.key)
             seen = f"; last value {_shown(binding, last.value)}, from earlier" if last else ""
             self._note(
@@ -321,6 +350,7 @@ class Bench:
                         "expected": expecting,
                         "outcome": "timeout",
                         "timeout": timeout,
+                        **_step_facts(reading),
                     },
                 )
             )
@@ -330,9 +360,8 @@ class Bench:
                 f"{self._last_seen(binding.key)}",
                 hint=self._what_to_check(binding),
             )
-        applied, value = self._as_read(binding, item.value)
-        if applied:
-            self.corrupted += 1
+        applied, value = self._as_read(binding, item.value, reading)
+        self._settle(binding, reading, item.value, applied)
         self._note(
             RecordEntry(
                 WAIT,
@@ -345,6 +374,7 @@ class Bench:
                     "expected": expecting,
                     "outcome": "reached",
                     "waited": waited,
+                    **_step_facts(reading),
                     **self._corrupted_facts(item.value, applied),
                 },
             )
@@ -352,13 +382,17 @@ class Bench:
         return value
 
     def _not_reached(
-        self, binding: Binding, expecting: str, timeout: float, arrived: list[Received]
+        self,
+        binding: Binding,
+        expecting: str,
+        timeout: float,
+        arrived: list[Received],
+        reading: Reading,
     ) -> None:
         """Values arrived but none matched: record it, and fail the test like an ``assert``."""
         __tracebackhide__ = True
-        applied, value = self._as_read(binding, arrived[-1].value)
-        if applied:
-            self.corrupted += 1
+        applied, value = self._as_read(binding, arrived[-1].value, reading)
+        self._settle(binding, reading, arrived[-1].value, applied)
         count = f"{len(arrived)} value{'' if len(arrived) == 1 else 's'}"
         self._note(
             RecordEntry(
@@ -373,6 +407,7 @@ class Bench:
                     "outcome": "not reached",
                     "timeout": timeout,
                     "arrived": len(arrived),
+                    **_step_facts(reading),
                     **self._corrupted_facts(arrived[-1].value, applied),
                 },
             )
@@ -383,16 +418,48 @@ class Bench:
             f"{binding.endpoint}): {count} arrived {since}, the last {_shown(binding, value)}"
         )
 
-    def _as_read(self, binding: Binding, value: Any) -> tuple[bool, Any]:
+    def _start_reading(self, binding: Binding, check: bool) -> Reading:
+        """Log a reading the test is taking: its number among the checked ones, and where."""
+        index = sum(1 for taken in self.readings if taken.checked) + 1 if check else None
+        reading = Reading(index, binding.key, _caller(), check)
+        self.readings.append(reading)
+        return reading
+
+    def _as_read(self, binding: Binding, value: Any, reading: Reading) -> tuple[bool, Any]:
         """What the test is given for a value that arrived: the value itself or, while the test
-        check runs, the corrupted value; and whether it was corrupted."""
+        check corrupts this reading, the corrupted value; and whether it was corrupted."""
         mode = self.corruption
+        if mode is None or not reading.checked:
+            return False, value
+        if self.corrupt_at is not None and reading.index != self.corrupt_at:
+            return False, value
         if mode == SHIFT:
             return shifted(binding.signal, value)
         if mode == STALE:
             before = self._buffer.before_write(binding.key)
-            return (True, before.value) if before is not None else (False, value)
+            if before is None:
+                return False, value
+            return before.value != value, before.value
         return False, value
+
+    def _settle(self, binding: Binding, reading: Reading, received: Any, applied: bool) -> None:
+        """Note whether the test check changed this reading, and if it was meant to but
+        couldn't, why."""
+        reading.corrupted = applied
+        if applied or self.corruption is None or not reading.checked:
+            return
+        if self.corrupt_at is not None and reading.index != self.corrupt_at:
+            return
+        if self.corruption == STALE:
+            before = self._buffer.before_write(binding.key)
+            reading.note = (
+                "no value of it arrived before a write"
+                if before is None
+                else f"it was already {_shown(binding, before.value)} before the write, so a DUT "
+                "that ignored the write would look the same at this step"
+            )
+        else:
+            reading.note = f"its value {_shown(binding, received)} can't be shifted"
 
     def _corrupted_note(self, binding: Binding, received: Any, applied: bool) -> str:
         if not applied:
@@ -400,7 +467,7 @@ class Bench:
         return f" (test check, {self.corruption}: {_shown(binding, received)} arrived)"
 
     def _corrupted_facts(self, received: Any, applied: bool) -> dict[str, Any]:
-        return {"check": self.corruption, "received": received} if applied else {}
+        return {"corruption": self.corruption, "received": received} if applied else {}
 
     # --- the DUT's identity -----------------------------------------------------------------
 
@@ -651,6 +718,25 @@ def _bindings(description: InterfaceDescription, harness: HarnessConfig) -> dict
                 key=key, equipment=endpoint.equipment, channel=endpoint.channel, drive=drive
             )
     return bindings
+
+
+def _step_facts(reading: Reading) -> dict[str, Any]:
+    """Where the test took a reading, and whether it is one of the test's checks."""
+    facts: dict[str, Any] = {"where": reading.where} if reading.where else {}
+    if not reading.checked:
+        facts["checked"] = False
+    return facts
+
+
+def _caller() -> str:
+    """The file and line outside BenchTare that called into it: the test's step."""
+    frame = inspect.currentframe()
+    while frame is not None:
+        filename = os.path.normcase(os.path.abspath(frame.f_code.co_filename))
+        if not filename.startswith(_PACKAGE):
+            return f"{os.path.basename(filename)}:{frame.f_lineno}"
+        frame = frame.f_back
+    return ""
 
 
 def _facts(binding: Binding, value: Any) -> dict[str, Any]:

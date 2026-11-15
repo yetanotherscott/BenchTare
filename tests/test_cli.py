@@ -130,7 +130,7 @@ def test_check_tests_exits_0_when_every_test_can_fail(project):
     result = benchtare(project, "check-tests", *CLI)
     assert result.ret == 0
     result.stdout.fnmatch_lines(
-        ["test_good.py::test_tracks: able to fail (shift, stale)", "Test check: 1 able to fail"]
+        ["test_good.py::test_tracks: able to fail at its reading", "Test check: 1 able to fail"]
     )
 
 
@@ -144,7 +144,7 @@ def test_check_tests_exits_1_when_a_test_cant_fail(project):
     )
     result = benchtare(project, "check-tests", *CLI)
     assert result.ret == 1
-    result.stdout.fnmatch_lines(["test_weak.py::test_reads_but_never_checks: UNABLE TO FAIL"])
+    result.stdout.fnmatch_lines(["test_weak.py::test_reads_but_never_checks: UNABLE TO FAIL*"])
 
 
 def test_check_tests_help_explains_the_command(project):

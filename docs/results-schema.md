@@ -297,18 +297,21 @@ The list is a minimum, not a limit:
 
 Migration 1 to 2 adds:
 
-- **`test_checks`**: one row per test and mode of a test check run (`runs.kind`
-  is `check-tests`).
+- **`test_checks`**: one row per rerun of a test check run (`runs.kind` is
+  `check-tests`): the control, and each checked reading under each mode.
 
   | Column | Type | Notes |
   | --- | --- | --- |
   | `run_id` | TEXT, not null | |
   | `test_seq` | INTEGER, not null | The test, as `test_results.seq` |
-  | `mode` | TEXT, not null | `shift` or `stale` |
-  | `outcome` | TEXT, not null | `failed` (the test can catch this fault), `passed`, `inconclusive` or `not applied` |
-  | `detail` | TEXT, not null | Why it failed, or what it read when it passed |
+  | `reading` | INTEGER, not null | The checked reading corrupted, from 1 in the order the test took them; 0 for the control |
+  | `signal` | TEXT | The reading's signal; null for the control |
+  | `location` | TEXT | The test's file and line that took it, such as `test_x.py:14`; null for the control |
+  | `mode` | TEXT, not null | `control`, `shift` or `stale` |
+  | `outcome` | TEXT, not null | `failed` (the step caught it), `passed`, `inconclusive` or `not applied`; for the control, `passed` (it repeats) or `inconclusive` |
+  | `detail` | TEXT, not null | Where and why it failed, what it read when it passed, or why it proves nothing |
 
-  Primary key: `run_id, test_seq, mode`.
+  Primary key: `run_id, test_seq, reading, mode`.
 - **`test_results.check_verdict`** (TEXT): `able to fail`, `unable to fail`,
   `inconclusive` or `not checked`; null outside a test check run.
 - **`manifest_files.last_checked_at`** (TEXT) and
@@ -316,9 +319,13 @@ Migration 1 to 2 adds:
   when the latest finished test check of the same DUT ran on that path, and
   whether the file's hash is the same now. Both null when it was never checked.
 - **Each rerun's record** goes into `record_entries` with the phase named after
-  the mode: `shift setup`, `shift call`, `shift teardown`, `stale call`, and so
-  on. A corrupted reading's `value` is what the test was given; `data` holds
-  `check` (the mode) and `received` (what arrived).
+  the rerun: `control setup`, `control call`, `reading 2 shift call`,
+  `reading 2 stale teardown`, and so on. A corrupted reading's `value` is what
+  the test was given; `data` holds `corruption` (the mode) and `received`
+  (what arrived).
+- **Each reading's step**, in every run: `data.where` is the test's file and
+  line that took it, and `data.checked` is `false` for a reading taken with
+  `check=False`.
 
 Version 2 also tells two `wait_until` outcomes apart in `data.outcome`:
 `not reached` when values arrived but none matched (the test fails like an

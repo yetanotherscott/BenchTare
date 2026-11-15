@@ -1,6 +1,10 @@
-"""The test check through pytest: --check-tests reruns each passing test with its readings
-corrupted, judges whether it can fail, and stores the verdicts. The corruption modes themselves
-are in test_testcheck.py."""
+"""The test check through pytest: --check-tests walks through each passing test a reading at a
+time, proves each reading's check can fail, and stores the verdicts. The corruption modes
+themselves are in test_testcheck.py.
+
+Several tests count their runs in a module-level list, to misbehave on one rerun. The order is:
+the usual run, the control, then for each reading shift and stale. So with one reading, run 3
+is its shift rerun and run 4 its stale rerun; with two, runs 5 and 6 are reading 2's."""
 
 import json
 import shutil
@@ -57,6 +61,9 @@ def query(project, sql):
         db.close()
 
 
+# --- every step of a test is exercised -------------------------------------------------------------
+
+
 def test_a_test_with_a_real_check_can_fail(project):
     project.makepyfile(test_bench=GOOD)
     result = project.runpytest(*CLI, "--check-tests")
@@ -65,10 +72,69 @@ def test_a_test_with_a_real_check_can_fail(project):
     result.stdout.fnmatch_lines(
         [
             "*= BenchTare test check =*",
-            "test_bench.py::test_tracks: able to fail (shift, stale)",
+            "test_bench.py::test_tracks: able to fail at its reading",
             "Test check: 1 able to fail",
         ]
     )
+
+
+def test_every_step_is_shown_with_where_it_failed(project):
+    project.makepyfile(
+        test_bench="""
+        import pytest
+
+
+        def test_steps(at_zero, bench, signals):
+            bench.write(signals.Setpoint, 42.0)
+            bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
+            assert bench.read(signals.Mode, timeout=1.0) == "run"
+        """
+    )
+    result = project.runpytest(*CLI, "--check-tests", "-v")
+    assert result.ret == pytest.ExitCode.OK
+    result.stdout.fnmatch_lines(
+        [
+            "test_bench.py::test_steps: able to fail at each of its 2 readings",
+            "    control: passed, passed again unchanged, taking the same 2 readings",
+            "    reading 1, Measured (test_bench.py:6): able to fail (shift, stale)",
+            "        shift: failed, failed at test_bench.py:6: *ComparisonFailed: Measured did not *",
+            "        stale: failed, failed at test_bench.py:6: *the last 0.0 degC",
+            "    reading 2, Mode (test_bench.py:7): able to fail (shift)",
+            "        shift: failed, failed at test_bench.py:7: AssertionError: assert 'standby' *",
+            (
+                "        stale: not applied, it was already 'run' before the write, so a DUT that "
+                "ignored the write would look the same at this step"
+            ),
+        ]
+    )
+
+
+def test_a_step_that_isnt_checked_makes_the_test_unable_to_fail(project):
+    # Corrupting everything at once would stop at the first check and call this test able to
+    # fail. Going a reading at a time finds the step that checks nothing.
+    project.makepyfile(
+        test_bench="""
+        import pytest
+
+
+        def test_two_steps(at_zero, bench, signals):
+            bench.write(signals.Setpoint, 42.0)
+            bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
+            bench.read(signals.Mode, timeout=1.0)  # read, but never checked
+        """
+    )
+    result = project.runpytest(*CLI, "--check-tests")
+    assert result.ret == pytest.ExitCode.TESTS_FAILED  # though the test passed
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "test_bench.py::test_two_steps: UNABLE TO FAIL at 1 of 2 readings",
+            "    reading 2, Mode (test_bench.py:7): unable to fail",
+            "        shift: passed, reading Mode 'standby' instead of the 'run' that arrived",
+            "Test check: 1 unable to fail",
+        ]
+    )
+    result.stdout.no_fnmatch_line("    reading 1*")  # its one good step needs no comment
 
 
 def test_a_test_that_ignores_what_it_reads_is_unable_to_fail(project):
@@ -80,19 +146,17 @@ def test_a_test_that_ignores_what_it_reads_is_unable_to_fail(project):
         """
     )
     result = project.runpytest(*CLI, "--check-tests")
-    assert result.ret == pytest.ExitCode.TESTS_FAILED  # though the test passed
-    result.assert_outcomes(passed=1)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
     result.stdout.fnmatch_lines(
         [
-            "test_bench.py::test_ignores_it: UNABLE TO FAIL",
-            "    shift: passed, reading Measured * instead of the * that arrived",
-            "    stale: passed, reading Measured 0.0 degC from before the write*",
-            "Test check: 1 unable to fail",
+            "test_bench.py::test_ignores_it: UNABLE TO FAIL at its reading",
+            "    reading 1, Measured (test_bench.py:3): unable to fail",
+            "        shift: passed, reading Measured * instead of the * that arrived",
         ]
     )
 
 
-def test_a_mode_a_test_passes_is_shown_even_when_it_can_fail(project):
+def test_a_mode_a_reading_passes_is_shown_even_when_it_can_fail(project):
     # A check this loose catches a DUT that ignores the write, but not a wrong value.
     project.makepyfile(
         test_bench="""
@@ -105,14 +169,42 @@ def test_a_mode_a_test_passes_is_shown_even_when_it_can_fail(project):
     assert result.ret == pytest.ExitCode.OK
     result.stdout.fnmatch_lines(
         [
-            "test_bench.py::test_accepts_almost_anything: able to fail (stale)",
-            "    shift: passed, reading Measured 84.0 degC instead of the 42.0 degC that arrived",
-            "Test check: 1 able to fail",
+            "test_bench.py::test_accepts_almost_anything: able to fail at its reading",
+            "    reading 1, Measured (test_bench.py:3): able to fail (stale)",
+            "        shift: passed, reading Measured 84.0 degC instead of the 42.0 degC that arrived",
         ]
     )
 
 
-def test_stale_shows_a_test_that_cant_tell_whether_the_dut_responded(project):
+def test_a_reading_marked_unchecked_is_left_out(project):
+    project.makepyfile(
+        test_bench=GOOD
+        + """
+
+def test_only_records(at_zero, bench, signals):
+    bench.write(signals.Setpoint, 42.0)
+    bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
+    bench.read(signals.Mode, timeout=1.0, check=False)  # kept for trends, on purpose
+
+
+def test_checks_nothing_on_purpose(at_zero, bench, signals):
+    bench.read(signals.Mode, timeout=1.0, check=False)
+"""
+    )
+    result = project.runpytest(*CLI, "--check-tests")
+    assert result.ret == pytest.ExitCode.OK
+    result.stdout.fnmatch_lines(
+        [
+            "test_bench.py::test_only_records: able to fail at its reading",
+            (
+                "test_bench.py::test_checks_nothing_on_purpose: not checked, because it takes "
+                "no checked reading in its body"
+            ),
+        ]
+    )
+
+
+def test_stale_says_when_the_dut_was_already_where_the_test_expects(project):
     # No known starting point: on the rerun, Measured is already 42 from the run before, so a
     # DUT that ignored the write would pass too. Shift still shows the check works.
     project.makepyfile(
@@ -125,26 +217,218 @@ def test_stale_shows_a_test_that_cant_tell_whether_the_dut_responded(project):
             bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
         """
     )
-    result = project.runpytest(*CLI, "--check-tests")
+    result = project.runpytest(*CLI, "--check-tests", "-v")
     assert result.ret == pytest.ExitCode.OK
     result.stdout.fnmatch_lines(
         [
-            "test_bench.py::test_tracks: able to fail (shift)",
+            "test_bench.py::test_tracks: able to fail at its reading",
+            "    reading 1, Measured (test_bench.py:6): able to fail (shift)",
             (
-                "    stale: passed, reading Measured 42.0 degC from before the write, the same "
-                "as what arrived after it, so it can't tell whether the DUT responded"
+                "        stale: not applied, it was already 42.0 degC before the write, so a DUT "
+                "that ignored the write would look the same at this step"
             ),
         ]
     )
 
 
 def test_staging_reads_the_real_values(project):
-    # The staging fixture waits for Mode 'run'. Were it corrupted, every rerun would fail in
-    # setup and the verdict would be inconclusive.
-    project.makepyfile(test_bench=GOOD)
-    result = project.runpytest(*CLI, "--check-tests")
+    # This staging's first reading must match. Were staging corrupted as well as the test's
+    # body, the reruns would fail in setup and the verdict would be inconclusive.
+    project.makeconftest(
+        STAGING
+        + """
+
+@pytest.fixture
+def strict(bench, signals):
+    bench.write(signals.ModeRequest, "run")
+    bench.wait_until(signals.Mode, "run", timeout=1.0)
+    bench.write(signals.Setpoint, 0.0)
+    bench.wait_until(signals.Measured, 0.0, timeout=1.0)
+"""
+    )
+    project.makepyfile(test_bench=GOOD.replace("at_zero", "strict"))
+    result = project.runpytest(*CLI, "--check-tests", "-v")
     result.stdout.no_fnmatch_line("*staging didn't pass*")
-    result.stdout.fnmatch_lines(["*: able to fail (shift, stale)"])
+    result.stdout.fnmatch_lines(["*: able to fail at its reading"])
+
+
+# --- every failure counted is the corrupted reading's doing ----------------------------------------
+
+
+def test_a_failure_caught_at_a_later_step_counts_and_says_where(project):
+    project.makepyfile(
+        test_bench="""
+        import pytest
+
+
+        def test_checks_at_the_end(at_zero, bench, signals):
+            bench.write(signals.Setpoint, 42.0)
+            measured = bench.read(signals.Measured, timeout=1.0)
+            bench.wait_until(signals.Mode, "run", timeout=1.0)
+            assert measured in (0.0, 42.0)
+        """
+    )
+    result = project.runpytest(*CLI, "--check-tests", "-v")
+    result.stdout.fnmatch_lines(
+        [
+            "    reading 1, Measured (test_bench.py:6): able to fail (shift*",
+            (
+                "        shift: failed, failed later, at test_bench.py:8, after reading 2: "
+                "assert * in (0.0, 42.0)"
+            ),
+        ]
+    )
+
+
+def test_a_failure_before_the_corrupted_step_proves_nothing(project):
+    project.makepyfile(
+        test_bench="""
+        import pytest
+
+        RUNS = []
+
+
+        def test_glitches_once(at_zero, bench, signals):
+            RUNS.append(1)
+            bench.write(signals.Setpoint, 42.0)
+            bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
+            assert len(RUNS) != 5, "a glitch on the rerun for reading 2, before reaching it"
+            assert bench.read(signals.Mode, timeout=1.0) == "run"
+        """
+    )
+    result = project.runpytest(*CLI, "--check-tests")
+    assert result.ret == pytest.ExitCode.OK
+    result.stdout.fnmatch_lines(
+        [
+            "test_bench.py::test_glitches_once: inconclusive",
+            "    reading 2, Mode (test_bench.py:11): inconclusive",
+            (
+                "        shift: inconclusive, failed at test_bench.py:10 before reaching this "
+                "reading, which the unchanged rerun passed, so the failure isn't this reading's "
+                "doing: AssertionError: a glitch*"
+            ),
+        ]
+    )
+
+
+def test_a_failure_with_nothing_corrupted_may_be_flaky(project):
+    project.makepyfile(
+        test_bench="""
+        RUNS = []
+
+
+        def test_flaky(at_zero, bench, signals):
+            RUNS.append(1)
+            bench.write(signals.Setpoint, 42.0)
+            bench.read(signals.Mode, timeout=1.0)
+            # Run 4 is the stale rerun, which can't change Mode: it was 'run' all along.
+            assert len(RUNS) != 4, "fails on its own"
+        """
+    )
+    result = project.runpytest(*CLI, "--check-tests")
+    result.stdout.fnmatch_lines(
+        [
+            "test_bench.py::test_flaky: inconclusive",
+            "    reading 1, Mode (test_bench.py:7): inconclusive",
+            "        shift: passed, *",
+            (
+                "        stale: inconclusive, failed at test_bench.py:9 with nothing corrupted, "
+                "so the test may be flaky: AssertionError: fails on its own*"
+            ),
+        ]
+    )
+
+
+def test_a_rerun_where_nothing_arrives_proves_nothing(project):
+    # Only the reruns that corrupt a reading lose the value: a timeout fails any test, good or
+    # bad, so it doesn't count as able to fail.
+    project.makepyfile(
+        test_bench="""
+        RUNS = []
+
+
+        def test_times_out_on_reruns(running, bench, signals):
+            RUNS.append(1)
+            if len(RUNS) > 2:
+                bench.simulation.cut("io.in1")  # Measured stops arriving
+            bench.write(signals.Setpoint, 42.0)
+            bench.read(signals.Measured, timeout=0.3)
+        """
+    )
+    result = project.runpytest(*CLI, "--check-tests")
+    assert result.ret == pytest.ExitCode.OK  # inconclusive is reported, but fails nothing
+    result.stdout.fnmatch_lines(
+        [
+            "test_bench.py::test_times_out_on_reruns: inconclusive",
+            "    reading 1, Measured (test_bench.py:9): inconclusive",
+            (
+                "        shift: inconclusive, nothing arrived, at test_bench.py:9: *no value of "
+                "Measured arrived*"
+            ),
+            "Test check: 1 inconclusive",
+        ]
+    )
+
+
+def test_a_test_that_doesnt_repeat_is_inconclusive(project):
+    project.makepyfile(
+        test_bench="""
+        import pytest
+
+        RUNS = []
+
+
+        def test_only_passes_once(at_zero, bench, signals):
+            RUNS.append(1)
+            bench.write(signals.Setpoint, 42.0)
+            bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
+            assert len(RUNS) == 1, "only passes the first time"
+        """
+    )
+    result = project.runpytest(*CLI, "--check-tests")
+    assert result.ret == pytest.ExitCode.OK
+    result.stdout.fnmatch_lines(
+        [
+            "test_bench.py::test_only_passes_once: inconclusive",
+            (
+                "    control: inconclusive, the test failed when rerun unchanged, at "
+                "test_bench.py:10: AssertionError: only passes the first time*. It isn't "
+                "repeatable, so nothing the check finds could be trusted"
+            ),
+        ]
+    )
+    result.stdout.no_fnmatch_line("    reading*")  # no step is judged
+
+
+def test_a_test_that_takes_different_readings_is_inconclusive(project):
+    project.makepyfile(
+        test_bench="""
+        import pytest
+
+        RUNS = []
+
+
+        def test_wanders(at_zero, bench, signals):
+            RUNS.append(1)
+            bench.write(signals.Setpoint, 42.0)
+            if len(RUNS) == 2:
+                assert bench.read(signals.Mode, timeout=1.0) == "run"
+            bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
+        """
+    )
+    result = project.runpytest(*CLI, "--check-tests")
+    result.stdout.fnmatch_lines(
+        [
+            "test_bench.py::test_wanders: inconclusive",
+            (
+                "    control: inconclusive, rerun unchanged, it read Mode, Measured instead of "
+                "Measured: it doesn't take the same readings each time"
+            ),
+        ]
+    )
+
+
+# --- what isn't checked ----------------------------------------------------------------------------
 
 
 def test_a_test_that_fails_is_not_rerun(project):
@@ -167,58 +451,6 @@ def test_a_test_that_fails_is_not_rerun(project):
     assert (project.path / "runs.txt").read_text().splitlines() == ["run"]
 
 
-def test_a_rerun_where_nothing_arrives_proves_nothing(project):
-    # The test only fails on its reruns, and only because no value arrives: a timeout fails any
-    # test, good or bad, so it doesn't count as able to fail.
-    project.makepyfile(
-        test_bench="""
-        RUNS = []
-
-
-        def test_times_out_on_reruns(running, bench, signals):
-            RUNS.append(1)
-            if len(RUNS) > 1:
-                bench.simulation.cut("io.in1")  # Measured stops arriving
-            bench.write(signals.Setpoint, 42.0)
-            bench.read(signals.Measured, timeout=0.3)
-        """
-    )
-    result = project.runpytest(*CLI, "--check-tests")
-    assert result.ret == pytest.ExitCode.OK  # inconclusive is reported, but fails nothing
-    result.stdout.fnmatch_lines(
-        [
-            "test_bench.py::test_times_out_on_reruns: inconclusive",
-            "    shift: inconclusive, nothing arrived to corrupt: *no value of Measured arrived*",
-            "    stale: inconclusive, nothing arrived to corrupt: *",
-            "Test check: 1 inconclusive",
-        ]
-    )
-
-
-def test_a_rerun_that_fails_with_nothing_corrupted_may_be_flaky(project):
-    project.makepyfile(
-        test_bench="""
-        RUNS = []
-
-
-        def test_flaky(at_zero, bench, signals):
-            RUNS.append(1)
-            bench.write(signals.Setpoint, 42.0)
-            assert len(RUNS) == 1, "only passes the first time"
-        """
-    )
-    result = project.runpytest(*CLI, "--check-tests")
-    result.stdout.fnmatch_lines(
-        [
-            "test_bench.py::test_flaky: inconclusive",
-            (
-                "    shift: inconclusive, failed with nothing corrupted, so the test may be "
-                "flaky: AssertionError: only passes the first time*"
-            ),
-        ]
-    )
-
-
 def test_a_test_that_reads_nothing_is_not_checked(project):
     project.makepyfile(
         test_bench="""
@@ -234,13 +466,17 @@ def test_a_test_that_reads_nothing_is_not_checked(project):
     assert result.ret == pytest.ExitCode.OK
     result.stdout.fnmatch_lines(
         [
-            "test_bench.py::test_only_writes: not checked",
-            "    shift: not applied, nothing it read could be shifted",
-            "    stale: not applied, nothing it read had a value from before a write",
+            (
+                "test_bench.py::test_only_writes: not checked, because it takes no checked "
+                "reading in its body"
+            ),
             "test_bench.py::test_plain: not checked, because it doesn't use the bench",
             "Test check: 2 not checked",
         ]
     )
+
+
+# --- stored ---------------------------------------------------------------------------------------
 
 
 def test_the_check_is_stored_with_each_tests_verdict_and_reruns(project):
@@ -250,7 +486,7 @@ def test_the_check_is_stored_with_each_tests_verdict_and_reruns(project):
 
 def test_ignores_it(at_zero, bench, signals):
     bench.write(signals.Setpoint, 42.0)
-    bench.read(signals.Measured, timeout=1.0)
+    bench.read(signals.Mode, timeout=1.0)
 """
     )
     project.runpytest(*CLI, "--check-tests")
@@ -260,35 +496,43 @@ def test_ignores_it(at_zero, bench, signals):
         ("test_bench.py::test_ignores_it", "passed", "unable to fail"),
     ]
     checks = query(
-        project, "SELECT test_seq, mode, outcome FROM test_checks ORDER BY test_seq, mode"
+        project,
+        "SELECT test_seq, reading, signal, location, mode, outcome FROM test_checks "
+        "ORDER BY test_seq, reading, mode",
     )
     assert checks == [
-        (1, "shift", "failed"),
-        (1, "stale", "failed"),
-        (2, "shift", "passed"),
-        (2, "stale", "passed"),
+        (1, 0, None, None, "control", "passed"),
+        (1, 1, "Measured", "test_bench.py:6", "shift", "failed"),
+        (1, 1, "Measured", "test_bench.py:6", "stale", "failed"),
+        (2, 0, None, None, "control", "passed"),
+        (2, 1, "Mode", "test_bench.py:11", "shift", "passed"),
+        (2, 1, "Mode", "test_bench.py:11", "stale", "not applied"),
     ]
     phases = query(
         project,
         "SELECT DISTINCT phase FROM record_entries WHERE test_seq = 2 ORDER BY phase",
     )
-    assert phases == [
-        ("call",),
-        ("setup",),
-        ("shift call",),
-        ("shift setup",),
-        ("shift teardown",),
-        ("stale call",),
-        ("stale setup",),
-        ("stale teardown",),
-        ("teardown",),
+    assert [phase for (phase,) in phases] == [
+        "call",
+        "control call",
+        "control setup",
+        "control teardown",
+        "reading 1 shift call",
+        "reading 1 shift setup",
+        "reading 1 shift teardown",
+        "reading 1 stale call",
+        "reading 1 stale setup",
+        "reading 1 stale teardown",
+        "setup",
+        "teardown",
     ]
     ((data,),) = query(
         project,
-        "SELECT data FROM record_entries WHERE test_seq = 2 AND phase = 'shift call' "
+        "SELECT data FROM record_entries WHERE test_seq = 2 AND phase = 'reading 1 shift call' "
         "AND kind = 'read'",
     )
-    assert json.loads(data)["check"] == "shift"
+    assert json.loads(data)["corruption"] == "shift"
+    assert json.loads(data)["where"] == "test_bench.py:11"
 
 
 def test_a_usual_run_says_which_test_files_need_checking(project):

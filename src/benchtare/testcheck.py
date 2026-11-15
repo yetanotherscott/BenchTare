@@ -1,19 +1,29 @@
-"""The test check: proving that each test can fail, by corrupting what it reads.
+"""The test check: proving that each test can fail at every verification step.
 
-A test that passes whatever the DUT does proves nothing. The test check (``pytest
---check-tests``, or ``benchtare check-tests``) runs each test as usual, then reruns each test
-that passed once per mode, with every reading in the test's body corrupted. Staging (setup) and
-teardown read the real values, so the DUT is put into the same state each time.
+A test that passes whatever the DUT does proves nothing, and neither does a test that fails at
+its first check but would pass whatever its later checks read. The test check (``pytest
+--check-tests``, or ``benchtare check-tests``) walks through each test that passed, one reading
+at a time. Each ``read`` and ``wait_until`` in the test's body is a verification step;
+``check=False`` marks one the test deliberately doesn't check.
 
-- ``shift``: the DUT reports a wrong value. A number moves by its own size (at least 1), a
-  boolean is inverted, and an enum takes the next of its states.
-- ``stale``: the DUT ignored the command. The test reads the value from before the bench's
-  most recent write, which a DUT that never responded would still be reporting.
+1. **The control.** The test runs again with nothing corrupted. It must pass and take the same
+   readings in the same order; otherwise it isn't repeatable, and nothing the check finds about
+   it could be trusted.
+2. **Each reading, under each mode.** The test runs again with only that reading corrupted, so
+   every earlier step reads real values and the test gets as far as the corrupted one:
 
-A test that fails under a mode can fail. A test that still passes under every mode that applied
-to it is reported as unable to fail. Readings that never arrived (``ReadTimeout``) prove
-nothing about the test's checks, so a mode that ends that way is inconclusive. Corrupting
-needs no ranges and works on any DUT: nothing here judges whether a value is valid.
+   - ``shift``: the DUT reports a wrong value. A number moves by its own size (at least 1), a
+     boolean is inverted, and an enum takes the next of its states.
+   - ``stale``: the DUT ignored the command. The reading gives the value from before the
+     bench's most recent write, which a DUT that never responded would still be reporting.
+     When that is the same as what arrived, stale changes nothing at that step, and says so.
+
+A failure counts only if it is the corrupted reading's doing: it happened at that step or after
+it, never before, and something was corrupted. Anything else (a failure before the step, a
+failure with nothing corrupted, a reading that never arrived) is inconclusive, so every
+"able to fail" is backed by real failures. A reading can fail if some mode makes the test fail;
+a test can fail only if every checked reading can. Staging (setup) and teardown always read
+the real values. Nothing here judges whether a value is valid, so no ranges are needed.
 
 See "The test check" in docs/model.md.
 """
@@ -31,27 +41,43 @@ from benchtare.signals.model import Signal, SignalType
 SHIFT = "shift"
 STALE = "stale"
 MODES = (SHIFT, STALE)
+CONTROL = "control"  # the rerun with nothing corrupted
 
-# What happened to a test under one mode.
-FAILED = "failed"  # the test failed: it can catch this kind of fault
-PASSED = "passed"  # it still passed
-INCONCLUSIVE = "inconclusive"  # nothing arrived to corrupt, or staging failed
-NOT_APPLIED = "not applied"  # nothing it read could be corrupted this way
+# What happened in one rerun.
+FAILED = "failed"  # the test failed because of the corrupted reading: it can catch this fault
+PASSED = "passed"  # it still passed (for the control: it repeats)
+INCONCLUSIVE = "inconclusive"  # the rerun proves nothing about the reading
+NOT_APPLIED = "not applied"  # this mode couldn't corrupt the reading
 
-# The verdict on a test.
+# The verdict on a reading, or on a test.
 ABLE = "able to fail"
 UNABLE = "unable to fail"
 UNKNOWN = "inconclusive"
-NOT_CHECKED = "not checked"  # it didn't pass to begin with, or read nothing to corrupt
+NOT_CHECKED = "not checked"  # it didn't pass to begin with, or took no reading to corrupt
+
+
+@dataclass
+class Reading:
+    """A reading the test took in its body: one of its verification steps."""
+
+    index: int | None  # its number among the test's checked readings, from 1; None if unchecked
+    signal: str
+    where: str  # the test's file and line that took it, such as "test_x.py:12"
+    checked: bool = True  # False when taken with check=False
+    corrupted: bool = False  # the test check gave the test a different value from what arrived
+    note: str = ""  # why the test check's mode couldn't change it, when it couldn't
 
 
 @dataclass(frozen=True)
 class ModeResult:
-    """One rerun of a test under one mode."""
+    """One rerun of a test: the control (``reading`` 0), or one reading under one mode."""
 
-    mode: str
+    reading: int  # the checked reading corrupted, from 1; 0 for the control
+    signal: str  # its signal; empty for the control
+    where: str  # the test's line that took it; empty for the control
+    mode: str  # CONTROL, SHIFT or STALE
     outcome: str  # FAILED, PASSED, INCONCLUSIVE or NOT_APPLIED
-    detail: str  # why it failed, or what it read when it passed
+    detail: str  # where and why it failed, or what it read when it passed
 
 
 def shifted(signal: Signal | None, value: Any) -> tuple[bool, Any]:
@@ -71,10 +97,17 @@ def shifted(signal: Signal | None, value: Any) -> tuple[bool, Any]:
     return False, value
 
 
-def verdict(normal: str, results: Sequence[ModeResult]) -> str:
-    """The verdict on a test from its normal outcome and its results under each mode."""
-    if normal != "passed":
-        return NOT_CHECKED
+def by_reading(results: Sequence[ModeResult]) -> dict[int, list[ModeResult]]:
+    """Each corrupted reading's results, in the test's order; the control is left out."""
+    grouped: dict[int, list[ModeResult]] = {}
+    for result in sorted(results, key=lambda r: r.reading):
+        if result.mode != CONTROL:
+            grouped.setdefault(result.reading, []).append(result)
+    return grouped
+
+
+def reading_verdict(results: Sequence[ModeResult]) -> str:
+    """The verdict on one reading: able to fail if some mode made the test fail."""
     outcomes = {result.outcome for result in results}
     if FAILED in outcomes:
         return ABLE
@@ -82,4 +115,17 @@ def verdict(normal: str, results: Sequence[ModeResult]) -> str:
         return UNKNOWN
     if PASSED in outcomes:
         return UNABLE
-    return NOT_CHECKED  # no mode applied: it read nothing in its body
+    return NOT_CHECKED  # no mode could corrupt it
+
+
+def verdict(normal: str, results: Sequence[ModeResult]) -> str:
+    """The verdict on a test: able to fail only if every checked reading can."""
+    if normal != "passed":
+        return NOT_CHECKED
+    if any(r.mode == CONTROL and r.outcome != PASSED for r in results):
+        return UNKNOWN  # not repeatable, so no rerun of it proves anything
+    verdicts = {reading_verdict(group) for group in by_reading(results).values()}
+    for decisive in (UNABLE, UNKNOWN, ABLE):
+        if decisive in verdicts:
+            return decisive
+    return NOT_CHECKED  # no reading, or none that could be corrupted

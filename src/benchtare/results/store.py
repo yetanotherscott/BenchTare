@@ -110,8 +110,9 @@ class ResultStore(Protocol):
         results: Sequence[ModeResult],
         records: Mapping[str, Mapping[str, Sequence[RecordEntry]]],
     ) -> None:
-        """A test's verdict from the test check, its result under each mode, and the record of
-        each rerun (``records[mode][phase]``)."""
+        """A test's verdict from the test check, the result of each rerun (the control, and
+        each reading under each mode), and each rerun's record (``records[rerun][phase]``,
+        where ``rerun`` is ``"control"`` or ``"reading 2 shift"``)."""
         ...
 
     def check_status(self, run_id: str) -> list[tuple[str, str | None, bool | None]]:
@@ -344,14 +345,14 @@ class SQLiteStore:
     ) -> None:
         first = self._next_entry.get(run_id, 1)
         entries = [
-            (mode, phase, entry)
-            for mode, phases in records.items()
+            (rerun, phase, entry)
+            for rerun, phases in records.items()
             for phase, phase_entries in phases.items()
             for entry in phase_entries
         ]
         rows = [
-            _entry_row(run_id, first + i, test_seq, f"{mode} {phase}", entry)
-            for i, (mode, phase, entry) in enumerate(entries)
+            _entry_row(run_id, first + i, test_seq, f"{rerun} {phase}", entry)
+            for i, (rerun, phase, entry) in enumerate(entries)
         ]
         with self._write():
             self.db.execute(
@@ -359,9 +360,21 @@ class SQLiteStore:
                 (verdict, run_id, test_seq),
             )
             self.db.executemany(
-                "INSERT INTO test_checks (run_id, test_seq, mode, outcome, detail) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [(run_id, test_seq, r.mode, r.outcome, r.detail) for r in results],
+                "INSERT INTO test_checks (run_id, test_seq, reading, signal, location, mode, "
+                "outcome, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        run_id,
+                        test_seq,
+                        r.reading,
+                        r.signal or None,
+                        r.where or None,
+                        r.mode,
+                        r.outcome,
+                        r.detail,
+                    )
+                    for r in results
+                ],
             )
             self.db.executemany(
                 """INSERT INTO record_entries (run_id, seq, test_seq, phase, at, kind, level,

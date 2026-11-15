@@ -161,13 +161,16 @@ def store_a_whole_run(store, run_id, *, finish=True):
         run_id, [RecordEntry("read", RecordLevel.RESULTS, "r", read)], phase="call", test_seq=1
     )
     store.add_identity(run_id, [IdentityValue("software", "102", "signal", True, now)])
-    shifted = {**read, "value": 84.0, "check": "shift", "received": 42.0}
+    shifted = {**read, "value": 84.0, "corruption": "shift", "received": 42.0}
     store.add_checks(
         run_id,
         1,
         f"verdict of {run_id}",  # different in each run, so a write to another run shows
-        [ModeResult("shift", "failed", "assert 84.0 == 42.0")],
-        {"shift": {"call": [RecordEntry("read", RecordLevel.RESULTS, "r", shifted)]}},
+        [
+            ModeResult(0, "", "", "control", "passed", "passed again unchanged"),
+            ModeResult(1, "Measured", "t.py:5", "shift", "failed", "failed at t.py:5"),
+        ],
+        {"reading 1 shift": {"call": [RecordEntry("read", RecordLevel.RESULTS, "r", shifted)]}},
     )
     if finish:
         store.finish_run(run_id, status="finished", exit_code=1, counts={"failed": 1})
@@ -204,29 +207,33 @@ def test_a_run_id_already_stored_is_refused_not_overwritten(store):
 # --- the test check -----------------------------------------------------------------------------
 
 
-def test_a_tests_check_is_stored_with_its_verdict_modes_and_reruns(store):
+def test_a_tests_check_is_stored_with_its_verdict_steps_and_reruns(store):
     store.start_run(run_info(kind="check-tests"))
     store.add_test("run-1", TestResult(1, "t.py::a", "t.py", "passed", time.time()))
     store.add_record("run-1", [RecordEntry("result", RecordLevel.RESULTS, "ok", {})], phase="call")
-    shifted = {"signal": "Measured", "value": 84.0, "check": "shift", "received": 42.0}
+    shifted = {"signal": "Measured", "value": 84.0, "corruption": "shift", "received": 42.0}
     store.add_checks(
         "run-1",
         1,
         "unable to fail",
         [
-            ModeResult("shift", "passed", "reading Measured 84.0 instead of 42.0"),
-            ModeResult("stale", "not applied", "nothing it read had a value from before"),
+            ModeResult(0, "", "", "control", "passed", "passed again unchanged"),
+            ModeResult(1, "Measured", "t.py:5", "shift", "passed", "reading Measured 84.0"),
+            ModeResult(1, "Measured", "t.py:5", "stale", "not applied", "it was already 42.0"),
         ],
-        {"shift": {"call": [RecordEntry("read", RecordLevel.RESULTS, "r", shifted)]}},
+        {"reading 1 shift": {"call": [RecordEntry("read", RecordLevel.RESULTS, "r", shifted)]}},
     )
     db = store.db
     assert db.execute("SELECT check_verdict FROM test_results").fetchall() == [("unable to fail",)]
-    assert db.execute("SELECT mode, outcome FROM test_checks ORDER BY mode").fetchall() == [
-        ("shift", "passed"),
-        ("stale", "not applied"),
+    assert db.execute(
+        "SELECT reading, signal, location, mode, outcome FROM test_checks ORDER BY reading, mode"
+    ).fetchall() == [
+        (0, None, None, "control", "passed"),
+        (1, "Measured", "t.py:5", "shift", "passed"),
+        (1, "Measured", "t.py:5", "stale", "not applied"),
     ]
-    rows = db.execute("SELECT seq, phase, value_num, data FROM record_entries ORDER BY seq")
-    assert [row[:3] for row in rows.fetchall()] == [(1, "call", None), (2, "shift call", 84.0)]
+    rows = db.execute("SELECT seq, phase, value_num FROM record_entries ORDER BY seq")
+    assert rows.fetchall() == [(1, "call", None), (2, "reading 1 shift call", 84.0)]
 
 
 def checked_file(store, run_id, kind, sha, *, dut="reference", finish=True):

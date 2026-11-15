@@ -168,16 +168,20 @@ TABLES_V1 = (
 
 
 def _v1_to_v2(db: sqlite3.Connection) -> None:
-    """Version 2 (M6), the test check: each test's result under each corruption mode, its
-    verdict, and for each test file in a manifest when it was last checked."""
+    """Version 2 (M6), the test check: each test's control rerun and each of its readings
+    under each corruption mode, its verdict, and for each test file in a manifest when it was
+    last checked."""
     db.execute(
         """CREATE TABLE test_checks (
             run_id TEXT NOT NULL REFERENCES runs (id),
             test_seq INTEGER NOT NULL,
+            reading INTEGER NOT NULL,
+            signal TEXT,
+            location TEXT,
             mode TEXT NOT NULL,
             outcome TEXT NOT NULL,
             detail TEXT NOT NULL,
-            PRIMARY KEY (run_id, test_seq, mode)
+            PRIMARY KEY (run_id, test_seq, reading, mode)
         )"""
     )
     db.execute("ALTER TABLE test_results ADD COLUMN check_verdict TEXT")

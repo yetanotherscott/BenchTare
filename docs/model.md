@@ -287,6 +287,11 @@ The `bench` fixture provides:
 | `bench.wait_until(signal, expected, timeout)` | Wait for a value of the signal, received after the bench's most recent write, that equals `expected` (`pytest.approx` works), or for which `expected` returns true if it is a function. Returns that value. **Use this to check how the DUT reacts** |
 | `bench.read(signal, timeout)` | Return the first value of the signal received after the bench's most recent write, waiting up to `timeout` seconds. A value from before the write is never returned, and a fast reply is never missed |
 
+Each `read` and `wait_until` in a test is one of its verification steps, and the
+test check (below) proves each one can fail. `check=False` on either marks a
+reading the test deliberately doesn't check, such as a measurement kept only for
+trends: `bench.read(signals.SupplyVoltage, timeout=1.0, check=False)`.
+
 **Why responses use `wait_until`.** The first value after a write is often
 sent before the DUT has reacted. This happens when the DUT reports an output
 cyclically, when a DAQ samples a channel continuously, or when a CAN frame
@@ -513,48 +518,76 @@ wrong).
 
 ### The test check (on demand)
 
-A test that passes whatever the DUT does proves nothing. The test check runs
-the tests as usual, then reruns each test that passed once per mode, with what
-it reads corrupted, and reports any test that still passes. It corrupts what
-the test reads, not the DUT, so it works for any DUT, and it needs no ranges:
-any clearly wrong value proves that a check is doing something.
+A test that passes whatever the DUT does proves nothing, and neither does a
+test that fails at its first check but would pass whatever its later checks
+read. The test check proves that each test can fail at **every** verification
+step. It corrupts what the test reads, not the DUT, so it works for any DUT,
+and it needs no ranges: any clearly wrong value proves a check is doing
+something.
 
-| Mode | The DUT fault it stands for | What the test reads instead |
+| Mode | The DUT fault it stands for | What the corrupted reading gives the test |
 | --- | --- | --- |
 | `shift` | A wrong value | A number moved by its own size (at least 1), a bool inverted, an enum's next state |
 | `stale` | The DUT ignored the command | The value from before the bench's most recent write |
 
-Only readings in the test's body are corrupted. Staging (setup) and teardown
-read the real values, so the DUT is put into the same state for each rerun.
+**How it walks through a test.** The tests run as usual. Then each test that
+passed runs again:
 
-**Verdicts**, per test:
+1. **The control,** with nothing corrupted. It must pass and take the same
+   readings in the same order. A test that doesn't repeat is reported as
+   inconclusive, because nothing the check found about it could be trusted.
+2. **One rerun per reading and mode,** with only that reading corrupted. Every
+   earlier step reads real values, so the test gets as far as the corrupted
+   step, and the check sees whether that step's check catches it.
 
-- **Able to fail:** at least one mode made it fail. A mode it still passed is
-  listed, because it names a fault the test would miss: "shift: passed,
+A test with *n* readings runs 2 + 2*n* times. Staging (setup) and teardown
+always read the real values, so the DUT is put into the same state each time.
+
+**Every failure counted is a real failure.** A rerun's failure counts as proof
+only when it is the corrupted reading's doing: it happened at that step, or
+after it ("failed later, at test_x.py:14, after reading 3"), and the reading
+really was changed. Anything else proves nothing about the test's checks, and
+is reported as inconclusive with the reason:
+
+- the test failed before reaching the corrupted step, which the control passed;
+- it failed with nothing corrupted, so it may be flaky;
+- nothing arrived (a `ReadTimeout` fails every test, good or bad);
+- staging failed on the rerun, or the rerun took different readings.
+
+**Verdicts.** A reading can fail if some mode makes the test fail there. A
+test:
+
+- **can fail** only if every checked reading can. A mode a reading still passes
+  is listed, because it names a fault that step would miss: "shift: passed,
   reading Measured 84.0 degC instead of the 42.0 degC that arrived" means its
   check accepts a clearly wrong value.
-- **Unable to fail:** it passed under every mode that applied. The run's exit
-  code is 1, even though every test passed.
-- **Inconclusive:** a rerun proved nothing. Nothing arrived to corrupt (a
-  `ReadTimeout` fails every test, good or bad), staging failed on the rerun, or
-  the test failed with nothing corrupted, which suggests it is flaky.
-- **Not checked:** it didn't pass to begin with, doesn't use the bench, or read
-  nothing in its body that a mode could change.
+- **can't fail** if any reading can't: "UNABLE TO FAIL at 1 of 3 readings",
+  with the step's line. The run's exit code is 1, even though every test
+  passed.
+- **is inconclusive** if the control failed, or a reading's reruns proved
+  nothing.
+- **isn't checked** if it didn't pass to begin with, doesn't use the bench, or
+  takes no checked reading in its body.
 
-**Reruns follow each other,** so each starts with the DUT in the state the
-previous run left it in. A test whose staging doesn't set a starting state
-that differs from what the test asks for passes under `stale`: "reading
-Measured 42.0 degC from before the write, the same as what arrived after it,
-so it can't tell whether the DUT responded". That is the classic false pass at
-a bench: the DUT was already where the test expected it. A staging fixture
-that sets a known, different starting point fixes it.
+**When a mode can't change a reading,** it is "not applied", with why: a value
+that can't be shifted, no value before a write, or, for `stale`, the value
+before the write being the same as what arrived ("it was already 42.0 degC
+before the write, so a DUT that ignored the write would look the same at this
+step"). That last one is worth reading when the write was meant to change that
+signal: the staging leaves the DUT where the test expects it, so the test
+can't tell whether the DUT responded. Reruns follow each other, so this shows
+up whenever staging doesn't set a starting point that differs from what the
+test asks for.
 
-The test check takes about three times as long as a usual run, so it runs on
-demand (`benchtare check-tests` or `pytest --check-tests`), not every session.
-Its verdicts and each rerun's record are stored. Each run's manifest records
-when each test file was last checked and whether it has changed since, and a
-usual run ends with a line naming any test file that was never checked or has
-changed since its last check.
+The report lists only what needs attention; `-v` shows every step, the control
+and where each rerun failed.
+
+The test check takes several times as long as a usual run, so it runs on demand
+(`benchtare check-tests` or `pytest --check-tests`), not every session. Its
+verdicts, every rerun's result and every rerun's record are stored. Each run's
+manifest records when each test file was last checked and whether it has
+changed since, and a usual run ends with a line naming any test file that was
+never checked or has changed since its last check.
 
 Ranges are not needed here, and BenchTare doesn't know them. Boundary values
 (above, below, at the limits of a range) are stimuli for tests the engineer

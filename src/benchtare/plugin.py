@@ -47,6 +47,7 @@ saying which file and what to check. ``--identify NAME=VALUE`` adds to the DUT's
 from __future__ import annotations
 
 import difflib
+import os
 import threading
 import time
 import uuid
@@ -131,6 +132,7 @@ _LEVEL = pytest.StashKey[RecordLevel]()
 _RESULTS = pytest.StashKey["Path | None"]()
 _IDENTIFY = pytest.StashKey[list[tuple[str, str]]]()
 _SEQ = pytest.StashKey[int]()  # the test's place in the run's results
+_READINGS = pytest.StashKey[list[testcheck.Reading]]()  # the readings its body took
 
 DEFAULT_RESULTS = Path(".benchtare") / "results.sqlite3"
 
@@ -390,7 +392,8 @@ class BenchSession:
         # The test check (benchtare.testcheck): the mode of the rerun in progress, if any, and
         # each test's verdict so far.
         self.check_tests = check_tests
-        self._checking: str | None = None
+        # The rerun in progress: (mode, the reading it corrupts); (None, None) for the control.
+        self._rerun_of: tuple[str | None, int | None] | None = None
         self.checked: list[CheckedTest] = []
         self._check_status: list[tuple[str, str | None, bool | None]] = []
         self.bench: Bench | None = None
@@ -689,25 +692,37 @@ class BenchSession:
     # --- the test check ---------------------------------------------------------------------
 
     def check_protocol(self, item: pytest.Item, nextitem: pytest.Item | None) -> bool:
-        """Run a test as usual, then, if it passed, once per corruption mode. Only the usual
-        run is reported and counted; the reruns give the test's verdict."""
+        """Run a test as usual and, if it passed, walk through it a reading at a time: a
+        control rerun with nothing corrupted, then a rerun per checked reading and mode with
+        only that reading corrupted. Only the usual run is reported and counted."""
         ihook = item.ihook
         ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
         runtestprotocol(item, nextitem=nextitem, log=True)
         if self.results_failure is not None:
             self._stop_run()
-        normal, main = _outcome(item.stash.get(_REPORTS, {}))
-        uses_bench = "bench" in getattr(item, "fixturenames", ())
+        normal, _ = _outcome(item.stash.get(_REPORTS, {}))
+        steps = [reading for reading in item.stash.get(_READINGS, []) if reading.checked]
         results: list[testcheck.ModeResult] = []
         records: dict[str, dict[str, list[RecordEntry]]] = {}
-        if normal == "passed" and uses_bench and self.bench is not None:
-            for mode in testcheck.MODES:
-                results.append(self._rerun(item, nextitem, mode))
-                records[mode] = item.stash.get(_RECORD, {})
-        verdict = testcheck.verdict(normal, results)
-        why = "" if normal == "passed" else f"it {normal}" if main is not None else ""
-        if normal == "passed" and not uses_bench:
+        why = ""
+        if normal != "passed":
+            why = f"it {normal}"
+        elif "bench" not in getattr(item, "fixturenames", ()) or self.bench is None:
             why = "it doesn't use the bench"
+        elif not steps:
+            why = "it takes no checked reading in its body"
+        else:
+            control = self._rerun(item, nextitem, None, None)
+            records[testcheck.CONTROL] = control.records
+            results.append(_control_result(control, steps))
+            if results[0].outcome == testcheck.PASSED:
+                for step in steps:
+                    assert step.index is not None
+                    for mode in testcheck.MODES:
+                        rerun = self._rerun(item, nextitem, mode, step.index)
+                        records[f"reading {step.index} {mode}"] = rerun.records
+                        results.append(_step_result(step, mode, rerun))
+        verdict = testcheck.verdict(normal, results)
         self.checked.append(CheckedTest(item.nodeid, normal, verdict, tuple(results), why))
         seq = item.stash.get(_SEQ, None)
         if seq is not None:
@@ -719,40 +734,72 @@ class BenchSession:
         return True
 
     def _rerun(
-        self, item: pytest.Item, nextitem: pytest.Item | None, mode: str
-    ) -> testcheck.ModeResult:
-        assert self.bench is not None
+        self,
+        item: pytest.Item,
+        nextitem: pytest.Item | None,
+        mode: str | None,
+        reading: int | None,
+    ) -> _Rerun:
+        """Run the test again, corrupting ``reading`` under ``mode`` (nothing for the control),
+        unreported. Its fixtures are set up afresh."""
         item.stash[_REPORTS] = {}
         item.stash[_RECORD] = {}
-        self.bench.corrupted = 0
-        self._checking = mode
+        item.stash[_READINGS] = []
+        self._rerun_of = (mode, reading)
         try:
             runtestprotocol(item, nextitem=nextitem, log=False)
         finally:
-            self._checking = None
-        return _mode_result(
-            mode,
-            item.stash.get(_REPORTS, {}),
-            item.stash.get(_RECORD, {}).get("call", []),
-            self.bench.corrupted,
+            self._rerun_of = None
+        return _Rerun(
+            dict(item.stash.get(_REPORTS, {})),
+            {phase: list(entries) for phase, entries in item.stash.get(_RECORD, {}).items()},
+            list(item.stash.get(_READINGS, [])),
         )
 
     def _show_checks(self, reporter: Any) -> None:
+        verbose = reporter.config.getoption("verbose") > 0
         reporter.write_sep("=", "BenchTare test check")
         for test in self.checked:
+            groups = testcheck.by_reading(test.results)
             if test.verdict == testcheck.ABLE:
-                failed = [r.mode for r in test.results if r.outcome == testcheck.FAILED]
-                reporter.write_line(f"{test.nodeid}: able to fail ({', '.join(failed)})")
+                count = len(groups)
+                each = "its reading" if count == 1 else f"each of its {count} readings"
+                reporter.write_line(f"{test.nodeid}: able to fail at {each}")
             elif test.verdict == testcheck.UNABLE:
-                reporter.write_line(f"{test.nodeid}: UNABLE TO FAIL", red=True, bold=True)
+                unable = sum(
+                    testcheck.reading_verdict(group) == testcheck.UNABLE
+                    for group in groups.values()
+                )
+                where = "its reading" if len(groups) == 1 else f"{unable} of {len(groups)} readings"
+                reporter.write_line(
+                    f"{test.nodeid}: UNABLE TO FAIL at {where}", red=True, bold=True
+                )
             elif test.verdict == testcheck.UNKNOWN:
                 reporter.write_line(f"{test.nodeid}: inconclusive", yellow=True)
             else:
                 reason = f", because {test.why}" if test.why else ""
                 reporter.write_line(f"{test.nodeid}: not checked{reason}")
             for result in test.results:
-                if result.outcome != testcheck.FAILED or test.verdict != testcheck.ABLE:
-                    reporter.write_line(f"    {result.mode}: {result.outcome}, {result.detail}")
+                if result.mode == testcheck.CONTROL and (
+                    verbose or result.outcome != testcheck.PASSED
+                ):
+                    reporter.write_line(f"    control: {result.outcome}, {result.detail}")
+            for number, group in groups.items():
+                reading_verdict = testcheck.reading_verdict(group)
+                failed = [r.mode for r in group if r.outcome == testcheck.FAILED]
+                missed = [
+                    r for r in group if r.outcome in (testcheck.PASSED, testcheck.INCONCLUSIVE)
+                ]
+                if not verbose and not missed:
+                    continue
+                caught = f" ({', '.join(failed)})" if failed else ""
+                reporter.write_line(
+                    f"    reading {number}, {group[0].signal} ({group[0].where}): "
+                    f"{reading_verdict}{caught}",
+                    red=reading_verdict == testcheck.UNABLE,
+                )
+                for result in group if verbose else missed:
+                    reporter.write_line(f"        {result.mode}: {result.outcome}, {result.detail}")
         counts = Counter(test.verdict for test in self.checked)
         order = (testcheck.ABLE, testcheck.UNABLE, testcheck.UNKNOWN, testcheck.NOT_CHECKED)
         summary = ", ".join(f"{counts[v]} {v}" for v in order if counts[v])
@@ -855,18 +902,22 @@ class BenchSession:
             entries = _phase_record(item, phase)
             entries.extend(self._pending)
             self._pending.clear()
-        # The test check corrupts what the test's body reads; staging and teardown read the
-        # real values, so the DUT is put into the same state for every rerun.
-        corrupting = phase == "call" and self._checking is not None and self.bench is not None
-        if corrupting:
+        # The test's body: log the readings it takes, its verification steps. The test check
+        # corrupts one of them; staging and teardown read the real values, so the DUT is put
+        # into the same state for every rerun.
+        body = phase == "call" and self.bench is not None
+        if body:
             assert self.bench is not None
-            self.bench.corruption = self._checking
+            self.bench.readings = []
+            if self._rerun_of is not None:
+                self.bench.corruption, self.bench.corrupt_at = self._rerun_of
         try:
             yield
         finally:
-            if corrupting:
+            if body:
                 assert self.bench is not None
-                self.bench.corruption = None
+                item.stash[_READINGS] = list(self.bench.readings)
+                self.bench.corruption = self.bench.corrupt_at = None
             with self._lock:
                 self._phase = None
                 unexpected = [entry for entry in entries if entry.unexpected]
@@ -908,7 +959,7 @@ class BenchSession:
             entries = snapshot.get(phase, [])
             if any(entry.kind != RESULT for entry in entries):
                 report.sections.append((f"BenchTare record {phase}", render(entries)))
-        if self._checking is not None:
+        if self._rerun_of is not None:
             # A rerun of the test check: judged by check_protocol, not stored as a test.
             report.benchtare_nothing_arrived = call.excinfo is not None and (
                 call.excinfo.errisinstance(ReadTimeout)
@@ -991,44 +1042,124 @@ class _CheckRunner:
         return self.session.check_protocol(item, nextitem)
 
 
-def _mode_result(
-    mode: str,
-    reports: dict[str, pytest.TestReport],
-    call_record: Sequence[RecordEntry],
-    corrupted: int,
-) -> testcheck.ModeResult:
-    """How one rerun went: the test failed, passed, or proved nothing."""
-    setup, call = reports.get("setup"), reports.get("call")
+@dataclass(frozen=True)
+class _Rerun:
+    """What one rerun of the test check left: its reports, record and readings."""
+
+    reports: dict[str, pytest.TestReport]
+    records: dict[str, list[RecordEntry]]
+    readings: list[testcheck.Reading]
+
+    @property
+    def taken(self) -> list[testcheck.Reading]:
+        """The checked readings the body took, in order."""
+        return [reading for reading in self.readings if reading.checked]
+
+
+def _control_result(rerun: _Rerun, steps: Sequence[testcheck.Reading]) -> testcheck.ModeResult:
+    """The control: the test, rerun unchanged, must pass and take the same readings."""
+
+    def result(outcome: str, detail: str) -> testcheck.ModeResult:
+        return testcheck.ModeResult(0, "", "", testcheck.CONTROL, outcome, detail)
+
+    setup, call = rerun.reports.get("setup"), rerun.reports.get("call")
     if setup is None or not setup.passed or call is None:
         why = _short_message(setup) if setup is not None else None
-        return testcheck.ModeResult(
-            mode, testcheck.INCONCLUSIVE, f"staging didn't pass on the rerun: {why or 'no report'}"
+        return result(
+            testcheck.INCONCLUSIVE,
+            f"staging didn't pass when the test was rerun unchanged: {why or 'no report'}",
+        )
+    if not call.passed:
+        return result(
+            testcheck.INCONCLUSIVE,
+            f"the test {call.outcome} when rerun unchanged, at {_failed_at(call, rerun)}: "
+            f"{_short_message(call)}. It isn't repeatable, so nothing the check finds could be "
+            "trusted",
+        )
+    expected = [step.signal for step in steps]
+    taken = [reading.signal for reading in rerun.taken]
+    if taken != expected:
+        return result(
+            testcheck.INCONCLUSIVE,
+            f"rerun unchanged, it read {', '.join(taken) or 'nothing'} instead of "
+            f"{', '.join(expected)}: it doesn't take the same readings each time",
+        )
+    count = len(steps)
+    return result(
+        testcheck.PASSED,
+        f"passed again unchanged, taking the same {count} reading{'' if count == 1 else 's'}",
+    )
+
+
+def _step_result(step: testcheck.Reading, mode: str, rerun: _Rerun) -> testcheck.ModeResult:
+    """One reading under one mode. A failure counts only if it is that reading's doing: at the
+    corrupted step or after it, with something corrupted, and not for want of a value."""
+    assert step.index is not None
+
+    def result(outcome: str, detail: str) -> testcheck.ModeResult:
+        return testcheck.ModeResult(step.index or 0, step.signal, step.where, mode, outcome, detail)
+
+    setup, call = rerun.reports.get("setup"), rerun.reports.get("call")
+    if setup is None or not setup.passed or call is None:
+        why = _short_message(setup) if setup is not None else None
+        return result(
+            testcheck.INCONCLUSIVE, f"staging didn't pass on the rerun: {why or 'no report'}"
+        )
+    taken = rerun.taken
+    target = taken[step.index - 1] if len(taken) >= step.index else None
+    if target is not None and target.signal != step.signal:
+        return result(
+            testcheck.INCONCLUSIVE,
+            f"its reading {step.index} was {target.signal}, not {step.signal}: the test took "
+            "different readings",
         )
     message = _short_message(call) or ""
     if call.skipped:
-        return testcheck.ModeResult(mode, testcheck.INCONCLUSIVE, f"skipped: {message}")
+        return result(testcheck.INCONCLUSIVE, f"skipped: {message}")
     if call.failed:
-        if getattr(call, "benchtare_nothing_arrived", False):
-            return testcheck.ModeResult(
-                mode, testcheck.INCONCLUSIVE, f"nothing arrived to corrupt: {message}"
-            )
-        if corrupted == 0:
-            return testcheck.ModeResult(
-                mode,
+        at = _failed_at(call, rerun)
+        if target is None:
+            return result(
                 testcheck.INCONCLUSIVE,
-                f"failed with nothing corrupted, so the test may be flaky: {message}",
+                f"failed at {at} before reaching this reading, which the unchanged rerun "
+                f"passed, so the failure isn't this reading's doing: {message}",
             )
-        return testcheck.ModeResult(mode, testcheck.FAILED, message)
-    if corrupted == 0:
-        return testcheck.ModeResult(
-            mode,
-            testcheck.NOT_APPLIED,
-            "nothing it read had a value from before a write"
-            if mode == testcheck.STALE
-            else "nothing it read could be shifted",
+        if getattr(call, "benchtare_nothing_arrived", False):
+            return result(testcheck.INCONCLUSIVE, f"nothing arrived, at {at}: {message}")
+        if not target.corrupted:
+            return result(
+                testcheck.INCONCLUSIVE,
+                f"failed at {at} with nothing corrupted, so the test may be flaky: {message}",
+            )
+        if len(taken) == step.index:
+            return result(testcheck.FAILED, f"failed at {at}: {message}")
+        return result(
+            testcheck.FAILED, f"failed later, at {at}, after reading {len(taken)}: {message}"
         )
-    readings = [_corrupted_reading(entry) for entry in call_record if "check" in entry.data]
-    return testcheck.ModeResult(mode, testcheck.PASSED, f"reading {'; '.join(readings)}")
+    if target is None:
+        return result(
+            testcheck.INCONCLUSIVE, "the rerun never took this reading: it took different ones"
+        )
+    if not target.corrupted:
+        return result(testcheck.NOT_APPLIED, target.note or "nothing could be changed")
+    given = [entry for entry in rerun.records.get("call", []) if "corruption" in entry.data]
+    shown = "; ".join(_corrupted_reading(entry) for entry in given)
+    return result(testcheck.PASSED, f"reading {shown}")
+
+
+def _failed_at(report: pytest.TestReport, rerun: _Rerun) -> str:
+    """The test's line where a rerun failed: where pytest says it crashed, unless that is
+    inside BenchTare, then the step it was taking."""
+    crash = getattr(report.longrepr, "reprcrash", None)
+    path = getattr(crash, "path", None)
+    if path is not None and not _inside_benchtare(str(path)):
+        return f"{Path(str(path)).name}:{crash.lineno}"
+    return rerun.readings[-1].where if rerun.readings else "an unknown line"
+
+
+def _inside_benchtare(path: str) -> bool:
+    package = os.path.normcase(str(Path(__file__).resolve().parent)) + os.sep
+    return os.path.normcase(os.path.abspath(path)).startswith(package)
 
 
 def _corrupted_reading(entry: RecordEntry) -> str:
@@ -1039,7 +1170,7 @@ def _corrupted_reading(entry: RecordEntry) -> str:
         return f"{value!r} {unit}" if unit else repr(value)
 
     signal, given, arrived = (entry.data.get(key) for key in ("signal", "value", "received"))
-    if entry.data.get("check") == testcheck.STALE:
+    if entry.data.get("corruption") == testcheck.STALE:
         if given == arrived:
             return (
                 f"{signal} {shown(given)} from before the write, the same as what arrived "
