@@ -11,7 +11,10 @@ Read these before making design decisions:
 - `docs/model.md`: what BenchTare models and what each file is for. This is
   the reference for terms and concepts.
 - `docs/design-brief.md`: goals, non-goals, architecture, prior art.
-- `docs/first-slice-plan.md`: what is being built now, and in what order.
+- `docs/first-slice-plan.md`: what was built for the first slice, and in what
+  order.
+- `docs/plugin-plan.md`: on the `plugins` branch, what is being built now: the
+  plugin interfaces and the example plugins, one step at a time.
 
 ## Current scope
 
@@ -24,9 +27,12 @@ On the `plugins` branch, work follows `docs/plugin-plan.md` instead, one step
 at a time. At each step's check-in, confirm its decisions with the user before
 writing code. The plan is a draft and will change.
 
-The plan has an "Out of scope for this slice" list. Do not build anything on
-it, even if the design brief describes it. If a task seems to need something
-out of scope, stop and ask.
+Each plan says what not to build, even where the design brief describes it.
+On `main`, that is the first-slice plan's "Out of scope for this slice" list.
+On the `plugins` branch, it is the plugin plan's "Not in this plan" list
+instead: the plugin plan builds some things the first-slice list rules out,
+such as SocketCAN, serial and SSH. If a task seems to need something out of
+scope, stop and ask.
 
 ## Hard rules
 
