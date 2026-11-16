@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]  # 1.27 is the first to write SPDX licence expressions
 build-backend = "hatchling.build"
 
 [project]
@@ -7,7 +7,8 @@ name = "benchtare"
 version = "0.0.1"
 description = "A self-verifying HIL/SIL test framework for embedded systems, built on pytest."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "Drew Scott" }]
 keywords = ["hil", "sil", "embedded", "testing", "pytest", "can", "hardware-in-the-loop"]
@@ -15,7 +16,6 @@ classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Framework :: Pytest",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
