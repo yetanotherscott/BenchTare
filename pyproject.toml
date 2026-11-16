@@ -1,25 +1,37 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]  # 1.27 is the first to write SPDX licence expressions
 build-backend = "hatchling.build"
 
 [project]
 name = "benchtare"
-version = "0.0.1"
+version = "0.0.2"
 description = "A self-verifying HIL/SIL test framework for embedded systems, built on pytest."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "Drew Scott" }]
 keywords = ["hil", "sil", "embedded", "testing", "pytest", "can", "hardware-in-the-loop"]
+# No licence classifier: the SPDX expression above replaces it. List only the Python versions CI
+# tests (.github/workflows/ci.yml).
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
     "Framework :: Pytest",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: Software Development :: Embedded Systems :: Controller Area Network (CAN)",
+    "Topic :: Software Development :: Quality Assurance",
     "Topic :: Software Development :: Testing",
     "Topic :: System :: Hardware",
 ]
@@ -32,6 +44,13 @@ dependencies = [
     "pytest>=7.4",     # BenchTare is a pytest plugin (M3); CI tests this floor
 ]
 
+[project.urls]
+Homepage = "https://github.com/yetanotherscott/BenchTare"
+Documentation = "https://github.com/yetanotherscott/BenchTare/tree/main/docs"
+Source ="https://github.com/yetanotherscott/BenchTare"
+Issues = "https://github.com/yetanotherscott/BenchTare/issues"
+Changelog = "https://github.com/yetanotherscott/BenchTare/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "ruff"]
 
@@ -43,6 +62,12 @@ benchtare = "benchtare.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/benchtare"]
+
+# Only what building and testing from source needs (the tests read CHANGELOG.md), so a local
+# build never picks up stray files.
+# pyproject.toml, README.md and LICENSE are always included.
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/docs", "/CHANGELOG.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

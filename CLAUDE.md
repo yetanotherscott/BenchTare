@@ -91,6 +91,16 @@ Use these names consistently in code, docs and messages.
   it, and record why in the commit message.
 - The results schema carries a version number. Any change to it needs a
   migration or a version bump, never a silent change.
+- Versions follow Semantic Versioning: until 1.0.0, a release that breaks
+  something users rely on bumps the minor version, and any other release bumps
+  the patch version. Every notable change gets a line under `## [Unreleased]`
+  in `CHANGELOG.md`, in the Keep a Changelog format.
+- To release: set the version in `pyproject.toml` and
+  `src/benchtare/__init__.py`, move the Unreleased lines under the new version
+  and its date, and update the links at the end of the changelog. Merge into
+  `main`, then publish a GitHub release tagged `v` plus the version. The
+  publish workflow uploads it to PyPI once the `pypi` environment's reviewer
+  approves.
 - Error messages are for a tired engineer at a bench: say what failed, which
   file and signal, and what to check.
 - Two records, kept apart. What happened at the bench during a test (reads,
