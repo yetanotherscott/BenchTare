@@ -12,14 +12,26 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "Drew Scott" }]
 keywords = ["hil", "sil", "embedded", "testing", "pytest", "can", "hardware-in-the-loop"]
+# No licence classifier: the SPDX expression above replaces it. List only the Python versions CI
+# tests (.github/workflows/ci.yml).
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
     "Framework :: Pytest",
     "Intended Audience :: Developers",
+    "Natural Language :: English",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: Software Development :: Embedded Systems :: Controller Area Network (CAN)",
+    "Topic :: Software Development :: Quality Assurance",
     "Topic :: Software Development :: Testing",
     "Topic :: System :: Hardware",
 ]
@@ -34,7 +46,8 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/yetanotherscott/BenchTare"
-Source = "https://github.com/yetanotherscott/BenchTare"
+Documentation = "https://github.com/yetanotherscott/BenchTare/tree/main/docs"
+Source ="https://github.com/yetanotherscott/BenchTare"
 Issues = "https://github.com/yetanotherscott/BenchTare/issues"
 Changelog = "https://github.com/yetanotherscott/BenchTare/blob/main/CHANGELOG.md"
 

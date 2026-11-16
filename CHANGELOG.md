@@ -21,6 +21,9 @@ something you rely on bumps y, and any other release bumps z.
 - The licence is declared as the SPDX expression `MIT`, so PyPI shows "MIT"
   instead of the whole licence text. The LICENSE file still ships in both
   packages.
+- PyPI's page links to the documentation, and its classifiers list each
+  supported Python version, the CAN and embedded-systems topics, and the
+  console tool.
 
 ## [0.0.1] - 2026-11-16
 
