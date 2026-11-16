@@ -101,10 +101,7 @@ def test_every_step_is_shown_with_where_it_failed(project):
             "        stale: failed, failed at test_bench.py:6: *the last 0.0 degC",
             "    reading 2, Mode (test_bench.py:7): able to fail (shift)",
             "        shift: failed, failed at test_bench.py:7: AssertionError: assert 'standby' *",
-            (
-                "        stale: not applied, it was already 'run' before the write, so a DUT that "
-                "ignored the write would look the same at this step"
-            ),
+            "        stale: not applied, it was already 'run' before the write, so stale can't change this step",
         ]
     )
 
@@ -224,8 +221,8 @@ def test_stale_says_when_the_dut_was_already_where_the_test_expects(project):
             "test_bench.py::test_tracks: able to fail at its reading",
             "    reading 1, Measured (test_bench.py:6): able to fail (shift)",
             (
-                "        stale: not applied, it was already 42.0 degC before the write, so a DUT "
-                "that ignored the write would look the same at this step"
+                "        stale: not applied, it was already 42.0 degC before the write, so stale "
+                "can't change this step"
             ),
         ]
     )
@@ -280,38 +277,44 @@ def test_a_failure_caught_at_a_later_step_counts_and_says_where(project):
     )
 
 
-def test_a_failure_before_the_corrupted_step_proves_nothing(project):
+# --- a test that doesn't repeat is a test hygiene problem, not a logic verdict -------------------
+
+
+def test_a_failure_before_the_corrupted_step_means_the_test_doesnt_repeat(project):
     project.makepyfile(
         test_bench="""
-        import pytest
+        from pathlib import Path
 
-        RUNS = []
+        import pytest
 
 
         def test_glitches_once(at_zero, bench, signals):
-            RUNS.append(1)
+            with Path("runs.txt").open("a") as runs:
+                runs.write("run\\n")
             bench.write(signals.Setpoint, 42.0)
             bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=1.0)
-            assert len(RUNS) != 5, "a glitch on the rerun for reading 2, before reaching it"
+            runs = len(Path("runs.txt").read_text().splitlines())
+            assert runs != 5, "a glitch on the shift rerun for reading 2, before reaching it"
             assert bench.read(signals.Mode, timeout=1.0) == "run"
         """
     )
     result = project.runpytest(*CLI, "--check-tests")
-    assert result.ret == pytest.ExitCode.OK
+    assert result.ret == pytest.ExitCode.OK  # hygiene doesn't fail the test check
     result.stdout.fnmatch_lines(
         [
-            "test_bench.py::test_glitches_once: inconclusive",
-            "    reading 2, Mode (test_bench.py:11): inconclusive",
             (
-                "        shift: inconclusive, failed at test_bench.py:10 before reaching this "
-                "reading, which the unchanged rerun passed, so the failure isn't this reading's "
-                "doing: AssertionError: a glitch*"
+                "test_bench.py::test_glitches_once: not checked, because of test hygiene: on the "
+                "rerun for reading 2, it failed at test_bench.py:12 before reaching that "
+                "reading, where it passed unchanged: AssertionError: a glitch*"
             ),
+            "Test check: 1 not checked (1 because of test hygiene)",
         ]
     )
+    # The walk stopped there: no stale rerun of reading 2 after the test failed to repeat.
+    assert len((project.path / "runs.txt").read_text().splitlines()) == 5
 
 
-def test_a_failure_with_nothing_corrupted_may_be_flaky(project):
+def test_a_failure_with_nothing_corrupted_means_the_test_doesnt_repeat(project):
     project.makepyfile(
         test_bench="""
         RUNS = []
@@ -328,12 +331,10 @@ def test_a_failure_with_nothing_corrupted_may_be_flaky(project):
     result = project.runpytest(*CLI, "--check-tests")
     result.stdout.fnmatch_lines(
         [
-            "test_bench.py::test_flaky: inconclusive",
-            "    reading 1, Mode (test_bench.py:7): inconclusive",
-            "        shift: passed, *",
             (
-                "        stale: inconclusive, failed at test_bench.py:9 with nothing corrupted, "
-                "so the test may be flaky: AssertionError: fails on its own*"
+                "test_bench.py::test_flaky: not checked, because of test hygiene: on the rerun for "
+                "reading 1, it failed at test_bench.py:9 with nothing corrupted: AssertionError: "
+                "fails on its own*"
             ),
         ]
     )
@@ -370,7 +371,7 @@ def test_a_rerun_where_nothing_arrives_proves_nothing(project):
     )
 
 
-def test_a_test_that_doesnt_repeat_is_inconclusive(project):
+def test_a_test_that_fails_when_run_again_is_not_checked_for_test_hygiene(project):
     project.makepyfile(
         test_bench="""
         import pytest
@@ -389,18 +390,17 @@ def test_a_test_that_doesnt_repeat_is_inconclusive(project):
     assert result.ret == pytest.ExitCode.OK
     result.stdout.fnmatch_lines(
         [
-            "test_bench.py::test_only_passes_once: inconclusive",
             (
-                "    control: inconclusive, the test failed when rerun unchanged, at "
-                "test_bench.py:10: AssertionError: only passes the first time*. It isn't "
-                "repeatable, so nothing the check finds could be trusted"
+                "test_bench.py::test_only_passes_once: not checked, because of test hygiene: it "
+                "failed when it ran again unchanged, at test_bench.py:10: AssertionError: only "
+                "passes the first time*"
             ),
         ]
     )
-    result.stdout.no_fnmatch_line("    reading*")  # no step is judged
+    result.stdout.no_fnmatch_line("    *")  # no step is judged, and no rerun is listed
 
 
-def test_a_test_that_takes_different_readings_is_inconclusive(project):
+def test_a_test_that_takes_different_readings_is_not_checked_for_test_hygiene(project):
     project.makepyfile(
         test_bench="""
         import pytest
@@ -419,10 +419,9 @@ def test_a_test_that_takes_different_readings_is_inconclusive(project):
     result = project.runpytest(*CLI, "--check-tests")
     result.stdout.fnmatch_lines(
         [
-            "test_bench.py::test_wanders: inconclusive",
             (
-                "    control: inconclusive, rerun unchanged, it read Mode, Measured instead of "
-                "Measured: it doesn't take the same readings each time"
+                "test_bench.py::test_wanders: not checked, because of test hygiene: run again "
+                "unchanged, it read Mode, Measured instead of Measured"
             ),
         ]
     )

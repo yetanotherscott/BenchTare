@@ -6,8 +6,9 @@
   cut wire and a line stuck at either level both fail. Each presence check passes: any frame
   received on the bus, or any value of the signal, within its ``within:`` seconds.
 
-A harness check on equipment that failed the bench check is skipped, since it couldn't tell
-anything new. See "The self-test" in docs/model.md.
+They verify two different things and give two verdicts. A harness check on equipment that
+failed the bench check is not checked rather than failed: a broken item says nothing about the
+wiring. See "What BenchTare verifies" and "The self-test" in docs/model.md.
 """
 
 from __future__ import annotations
@@ -26,6 +27,18 @@ from benchtare.harness.config import Loopback, Presence
 PASSED = "passed"
 FAILED = "failed"
 SKIPPED = "skipped"
+
+# The two areas the self-test verifies, and which kinds of check belong to each.
+BENCH = "bench"
+HARNESS = "harness"
+AREAS = (BENCH, HARNESS)
+_AREA_OF = {
+    "equipment": BENCH,
+    "simulation": BENCH,
+    "bench": BENCH,
+    "loopback": HARNESS,
+    "presence": HARNESS,
+}
 
 LOOPBACK_VALUES = (True, False)
 LOOPBACK_TIMEOUT = 1.0  # seconds for each value to read back
@@ -75,17 +88,38 @@ class SelfTestResult:
     def problems(self) -> list[CheckResult]:
         return [check for check in self.checks if not check.passed]
 
-    def summary(self) -> str:
-        """'2 equipment items, 1 loopback, 2 presence checks'."""
-        kinds = [check.kind for check in self.checks]
-        parts = [
-            count(kinds.count("equipment"), "equipment item"),
-            count(kinds.count("loopback"), "loopback"),
-            count(kinds.count("presence"), "presence check"),
-        ]
-        if "simulation" in kinds:
-            parts.append("the simulated DUT")
+    def checks_of(self, area: str) -> list[CheckResult]:
+        """The checks of one area: ``BENCH`` or ``HARNESS``."""
+        return [check for check in self.checks if _AREA_OF[check.kind] == area]
+
+    def outcome_of(self, area: str) -> str:
+        """An area's verdict: failed if any of its checks failed, skipped if any couldn't be
+        run because the bench check failed, otherwise passed."""
+        checks = self.checks_of(area)
+        if any(check.outcome == FAILED for check in checks):
+            return FAILED
+        if any(check.outcome == SKIPPED for check in checks):
+            return SKIPPED
+        if area == HARNESS and not checks and self.outcome_of(BENCH) == FAILED:
+            return SKIPPED  # the bench couldn't even be opened
+        return PASSED
+
+    def summary(self, area: str) -> str:
+        """'2 equipment items, the simulated DUT' or '1 loopback, 2 presence checks'."""
+        kinds = [check.kind for check in self.checks_of(area)]
+        if area == BENCH:
+            parts = [count(kinds.count("equipment"), "equipment item")]
+            if "simulation" in kinds:
+                parts.append("the simulated DUT")
+        else:
+            parts = [
+                count(kinds.count("loopback"), "loopback"),
+                count(kinds.count("presence"), "presence check"),
+            ]
         return ", ".join(parts)
+
+    def failed_areas(self) -> list[str]:
+        return [area for area in AREAS if self.outcome_of(area) == FAILED]
 
     def lines(self) -> list[str]:
         return [line for check in self.checks for line in check.lines()]

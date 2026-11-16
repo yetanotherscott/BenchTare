@@ -18,6 +18,7 @@ from benchtare.testcheck import (
     INCONCLUSIVE,
     NOT_APPLIED,
     NOT_CHECKED,
+    NOT_REPEATABLE,
     PASSED,
     SHIFT,
     STALE,
@@ -105,8 +106,12 @@ def test_a_test_can_fail_only_if_every_reading_can():
     assert verdict("passed", [control(), *uncorruptible]) == NOT_CHECKED
 
 
-def test_a_test_that_doesnt_repeat_proves_nothing():
-    assert verdict("passed", [control(INCONCLUSIVE)]) == UNKNOWN
+def test_a_test_that_doesnt_repeat_isnt_judged_on_its_logic():
+    # Test hygiene, not test logic: and once a test is seen not to repeat, even its failures
+    # can't be trusted to be real.
+    assert verdict("passed", [control(NOT_REPEATABLE)]) == NOT_CHECKED
+    flaky = [control(), step(1, SHIFT, FAILED), step(1, STALE, NOT_REPEATABLE)]
+    assert verdict("passed", flaky) == NOT_CHECKED
 
 
 @pytest.mark.parametrize("normal", ["failed", "skipped", "error"])
@@ -226,10 +231,7 @@ def test_stale_changes_nothing_when_the_value_was_already_there_and_says_why(ben
     assert bench.wait_until(bench.signals.Mode, "run", timeout=1.0) == "run"
     (reading,) = bench.readings
     assert not reading.corrupted
-    assert reading.note == (
-        "it was already 'run' before the write, so a DUT that ignored the write would look the "
-        "same at this step"
-    )
+    assert reading.note == "it was already 'run' before the write, so stale can't change this step"
 
 
 def test_nothing_is_corrupted_when_the_mode_is_off_or_cant_apply():

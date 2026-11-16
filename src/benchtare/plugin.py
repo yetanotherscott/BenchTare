@@ -112,6 +112,7 @@ from benchtare.results.store import (
     TestResult,
 )
 from benchtare.selftest import SelfTestResult, could_not_open, run_selftest
+from benchtare.selftest import checks as selftest_checks
 from benchtare.signals.model import SignalSet
 
 SETTINGS = {
@@ -715,13 +716,17 @@ class BenchSession:
             control = self._rerun(item, nextitem, None, None)
             records[testcheck.CONTROL] = control.records
             results.append(_control_result(control, steps))
-            if results[0].outcome == testcheck.PASSED:
-                for step in steps:
-                    assert step.index is not None
-                    for mode in testcheck.MODES:
-                        rerun = self._rerun(item, nextitem, mode, step.index)
-                        records[f"reading {step.index} {mode}"] = rerun.records
-                        results.append(_step_result(step, mode, rerun))
+            reruns = [(step, mode) for step in steps for mode in testcheck.MODES]
+            for step, mode in reruns:
+                if results[-1].outcome == testcheck.NOT_REPEATABLE:
+                    break  # test hygiene: nothing further would prove anything
+                assert step.index is not None
+                rerun = self._rerun(item, nextitem, mode, step.index)
+                records[f"reading {step.index} {mode}"] = rerun.records
+                results.append(_step_result(step, mode, rerun))
+            unrepeatable = [r for r in results if r.outcome == testcheck.NOT_REPEATABLE]
+            if unrepeatable:
+                why = f"of test hygiene: {unrepeatable[0].detail}"
         verdict = testcheck.verdict(normal, results)
         self.checked.append(CheckedTest(item.nodeid, normal, verdict, tuple(results), why))
         seq = item.stash.get(_SEQ, None)
@@ -778,7 +783,9 @@ class BenchSession:
                 reporter.write_line(f"{test.nodeid}: inconclusive", yellow=True)
             else:
                 reason = f", because {test.why}" if test.why else ""
-                reporter.write_line(f"{test.nodeid}: not checked{reason}")
+                reporter.write_line(f"{test.nodeid}: not checked{reason}", yellow=test.hygiene)
+                if test.hygiene and not verbose:
+                    continue  # the reason says it all; -v shows each rerun
             for result in test.results:
                 if result.mode == testcheck.CONTROL and (
                     verbose or result.outcome != testcheck.PASSED
@@ -802,8 +809,11 @@ class BenchSession:
                     reporter.write_line(f"        {result.mode}: {result.outcome}, {result.detail}")
         counts = Counter(test.verdict for test in self.checked)
         order = (testcheck.ABLE, testcheck.UNABLE, testcheck.UNKNOWN, testcheck.NOT_CHECKED)
-        summary = ", ".join(f"{counts[v]} {v}" for v in order if counts[v])
-        reporter.write_line(f"Test check: {summary or 'no tests'}")
+        parts = [f"{counts[v]} {v}" for v in order if counts[v]]
+        hygiene = sum(test.hygiene for test in self.checked)
+        if hygiene:
+            parts[-1] += f" ({hygiene} because of test hygiene)"
+        reporter.write_line(f"Test check: {', '.join(parts) or 'no tests'}")
 
     def _show_check_status(self, reporter: Any) -> None:
         """For a usual run: which test files the test check hasn't covered as they are now."""
@@ -866,11 +876,9 @@ class BenchSession:
         if not any("bench" in getattr(item, "fixturenames", ()) for item in session.items):
             _write(config, "benchtare self-test: not run, because no test uses the bench")
             return None
-        if not self.pretest(config).passed:
-            pytest.exit(
-                "BenchTare's self-test failed, so no tests ran. What failed is listed above.",
-                returncode=pytest.ExitCode.INTERRUPTED,
-            )
+        result = self.pretest(config)
+        if not result.passed:
+            pytest.exit(_selftest_failed(result), returncode=pytest.ExitCode.INTERRUPTED)
         return None
 
     @pytest.hookimpl(hookwrapper=True)
@@ -1030,6 +1038,11 @@ class CheckedTest:
     results: tuple[testcheck.ModeResult, ...]
     why: str = ""  # why it wasn't checked
 
+    @property
+    def hygiene(self) -> bool:
+        """It wasn't checked because it doesn't repeat: a test hygiene problem."""
+        return any(r.outcome == testcheck.NOT_REPEATABLE for r in self.results)
+
 
 class _CheckRunner:
     """Runs each test through the test check. Registered only with --check-tests."""
@@ -1057,7 +1070,8 @@ class _Rerun:
 
 
 def _control_result(rerun: _Rerun, steps: Sequence[testcheck.Reading]) -> testcheck.ModeResult:
-    """The control: the test, rerun unchanged, must pass and take the same readings."""
+    """The control: the test, run again unchanged, must pass and take the same readings. If
+    it doesn't, it doesn't repeat: a test hygiene problem, and its logic can't be checked."""
 
     def result(outcome: str, detail: str) -> testcheck.ModeResult:
         return testcheck.ModeResult(0, "", "", testcheck.CONTROL, outcome, detail)
@@ -1066,23 +1080,22 @@ def _control_result(rerun: _Rerun, steps: Sequence[testcheck.Reading]) -> testch
     if setup is None or not setup.passed or call is None:
         why = _short_message(setup) if setup is not None else None
         return result(
-            testcheck.INCONCLUSIVE,
-            f"staging didn't pass when the test was rerun unchanged: {why or 'no report'}",
+            testcheck.NOT_REPEATABLE,
+            f"its staging didn't pass when it ran again unchanged: {why or 'no report'}",
         )
     if not call.passed:
         return result(
-            testcheck.INCONCLUSIVE,
-            f"the test {call.outcome} when rerun unchanged, at {_failed_at(call, rerun)}: "
-            f"{_short_message(call)}. It isn't repeatable, so nothing the check finds could be "
-            "trusted",
+            testcheck.NOT_REPEATABLE,
+            f"it {call.outcome} when it ran again unchanged, at {_failed_at(call, rerun)}: "
+            f"{_short_message(call)}",
         )
     expected = [step.signal for step in steps]
     taken = [reading.signal for reading in rerun.taken]
     if taken != expected:
         return result(
-            testcheck.INCONCLUSIVE,
-            f"rerun unchanged, it read {', '.join(taken) or 'nothing'} instead of "
-            f"{', '.join(expected)}: it doesn't take the same readings each time",
+            testcheck.NOT_REPEATABLE,
+            f"run again unchanged, it read {', '.join(taken) or 'nothing'} instead of "
+            f"{', '.join(expected)}",
         )
     count = len(steps)
     return result(
@@ -1103,15 +1116,16 @@ def _step_result(step: testcheck.Reading, mode: str, rerun: _Rerun) -> testcheck
     if setup is None or not setup.passed or call is None:
         why = _short_message(setup) if setup is not None else None
         return result(
-            testcheck.INCONCLUSIVE, f"staging didn't pass on the rerun: {why or 'no report'}"
+            testcheck.NOT_REPEATABLE,
+            f"its staging didn't pass on the rerun for reading {step.index}: {why or 'no report'}",
         )
     taken = rerun.taken
     target = taken[step.index - 1] if len(taken) >= step.index else None
     if target is not None and target.signal != step.signal:
         return result(
-            testcheck.INCONCLUSIVE,
-            f"its reading {step.index} was {target.signal}, not {step.signal}: the test took "
-            "different readings",
+            testcheck.NOT_REPEATABLE,
+            f"on the rerun for reading {step.index}, that reading was {target.signal}, not "
+            f"{step.signal}",
         )
     message = _short_message(call) or ""
     if call.skipped:
@@ -1120,16 +1134,17 @@ def _step_result(step: testcheck.Reading, mode: str, rerun: _Rerun) -> testcheck
         at = _failed_at(call, rerun)
         if target is None:
             return result(
-                testcheck.INCONCLUSIVE,
-                f"failed at {at} before reaching this reading, which the unchanged rerun "
-                f"passed, so the failure isn't this reading's doing: {message}",
+                testcheck.NOT_REPEATABLE,
+                f"on the rerun for reading {step.index}, it failed at {at} before reaching "
+                f"that reading, where it passed unchanged: {message}",
             )
         if getattr(call, "benchtare_nothing_arrived", False):
             return result(testcheck.INCONCLUSIVE, f"nothing arrived, at {at}: {message}")
         if not target.corrupted:
             return result(
-                testcheck.INCONCLUSIVE,
-                f"failed at {at} with nothing corrupted, so the test may be flaky: {message}",
+                testcheck.NOT_REPEATABLE,
+                f"on the rerun for reading {step.index}, it failed at {at} with nothing "
+                f"corrupted: {message}",
             )
         if len(taken) == step.index:
             return result(testcheck.FAILED, f"failed at {at}: {message}")
@@ -1138,7 +1153,8 @@ def _step_result(step: testcheck.Reading, mode: str, rerun: _Rerun) -> testcheck
         )
     if target is None:
         return result(
-            testcheck.INCONCLUSIVE, "the rerun never took this reading: it took different ones"
+            testcheck.NOT_REPEATABLE,
+            f"on the rerun for reading {step.index}, it never took that reading",
         )
     if not target.corrupted:
         return result(testcheck.NOT_APPLIED, target.note or "nothing could be changed")
@@ -1189,27 +1205,46 @@ def _write(config: pytest.Config, line: str, **markup: bool) -> None:
 def _show_selftest(
     config: pytest.Config, result: SelfTestResult, record: Sequence[RecordEntry]
 ) -> None:
+    """The bench check and the harness check, each with its own verdict."""
     reporter = config.pluginmanager.get_plugin("terminalreporter")
     if reporter is None:
         return
-    verbose = config.getoption("verbose") > 0
-    took = f"in {result.duration:.2f} s"
-    if result.passed:
-        if verbose or config.getoption("benchtare_selftest_only"):
-            reporter.write_sep("=", f"BenchTare self-test passed {took}", green=True)
-            for line in result.lines():
-                reporter.write_line(line)
-        else:
-            reporter.write_line(
-                f"benchtare self-test passed: {result.summary()} {took}", green=True
-            )
-        return
-    reporter.write_sep("=", f"BenchTare self-test failed {took}", red=True)
-    for line in result.lines():
-        reporter.write_line(line, red=line.startswith(("FAILED", "        Check:")))
-    if record:
+    full = (
+        not result.passed
+        or config.getoption("verbose") > 0
+        or config.getoption("benchtare_selftest_only")
+    )
+    for area in selftest_checks.AREAS:
+        outcome = result.outcome_of(area)
+        skipped = outcome == selftest_checks.SKIPPED
+        word = outcome
+        if skipped:  # because the bench check failed
+            ran = any(check.outcome == selftest_checks.PASSED for check in result.checks_of(area))
+            word = "not complete" if ran else "not run"
+        colour = {
+            "green": outcome == selftest_checks.PASSED,
+            "red": outcome == selftest_checks.FAILED,
+            "yellow": skipped,
+        }
+        if not full:
+            reporter.write_line(f"benchtare {area} check {word}: {result.summary(area)}", **colour)
+            continue
+        reporter.write_sep("=", f"BenchTare {area} check {word}", **colour)
+        checks = result.checks_of(area)
+        if not checks and area == selftest_checks.HARNESS:
+            reporter.write_line("not checked, because the bench check failed")
+        for check in checks:
+            for line in check.lines():
+                reporter.write_line(line, red=line.startswith(("FAILED", "        Check:")))
+    if not result.passed and record:
         reporter.write_sep("-", "BenchTare record self-test")
         reporter.write_line(render(record))
+
+
+def _selftest_failed(result: SelfTestResult) -> str:
+    """Why no tests ran: which of the self-test's checks failed."""
+    failed = " and ".join(f"{area} check" for area in result.failed_areas()) or "self-test"
+    return f"BenchTare's {failed} failed, so no tests ran. What failed is listed above."
 
 
 def _phase_record(item: pytest.Item, phase: str) -> list[RecordEntry]:

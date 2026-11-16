@@ -19,11 +19,15 @@ at a time. Each ``read`` and ``wait_until`` in the test's body is a verification
      When that is the same as what arrived, stale changes nothing at that step, and says so.
 
 A failure counts only if it is the corrupted reading's doing: it happened at that step or after
-it, never before, and something was corrupted. Anything else (a failure before the step, a
-failure with nothing corrupted, a reading that never arrived) is inconclusive, so every
-"able to fail" is backed by real failures. A reading can fail if some mode makes the test fail;
-a test can fail only if every checked reading can. Staging (setup) and teardown always read
-the real values. Nothing here judges whether a value is valid, so no ranges are needed.
+it, never before, and something was corrupted. A reading can fail if some mode makes the test
+fail; a test can fail only if every checked reading can. Staging (setup) and teardown always
+read the real values. Nothing here judges whether a value is valid, so no ranges are needed.
+
+The test check verifies test logic only. A test that shows it doesn't repeat (the control fails
+or takes other readings, staging fails on a rerun, or a rerun fails before its corrupted step
+or with nothing corrupted) has a test hygiene problem: its logic is "not checked", the walk
+stops, and none of its reruns count, since a failure might not be real. A rerun that ends
+because nothing arrived is inconclusive. See "What BenchTare verifies" in docs/model.md.
 
 See "The test check" in docs/model.md.
 """
@@ -48,6 +52,7 @@ FAILED = "failed"  # the test failed because of the corrupted reading: it can ca
 PASSED = "passed"  # it still passed (for the control: it repeats)
 INCONCLUSIVE = "inconclusive"  # the rerun proves nothing about the reading
 NOT_APPLIED = "not applied"  # this mode couldn't corrupt the reading
+NOT_REPEATABLE = "not repeatable"  # the test didn't repeat: a test hygiene problem
 
 # The verdict on a reading, or on a test.
 ABLE = "able to fail"
@@ -76,7 +81,7 @@ class ModeResult:
     signal: str  # its signal; empty for the control
     where: str  # the test's line that took it; empty for the control
     mode: str  # CONTROL, SHIFT or STALE
-    outcome: str  # FAILED, PASSED, INCONCLUSIVE or NOT_APPLIED
+    outcome: str  # FAILED, PASSED, INCONCLUSIVE, NOT_APPLIED or NOT_REPEATABLE
     detail: str  # where and why it failed, or what it read when it passed
 
 
@@ -122,8 +127,8 @@ def verdict(normal: str, results: Sequence[ModeResult]) -> str:
     """The verdict on a test: able to fail only if every checked reading can."""
     if normal != "passed":
         return NOT_CHECKED
-    if any(r.mode == CONTROL and r.outcome != PASSED for r in results):
-        return UNKNOWN  # not repeatable, so no rerun of it proves anything
+    if any(r.outcome == NOT_REPEATABLE for r in results):
+        return NOT_CHECKED  # test hygiene: no rerun of it proves anything about its logic
     verdicts = {reading_verdict(group) for group in by_reading(results).values()}
     for decisive in (UNABLE, UNKNOWN, ABLE):
         if decisive in verdicts:

@@ -455,8 +455,8 @@ class Bench:
             reading.note = (
                 "no value of it arrived before a write"
                 if before is None
-                else f"it was already {_shown(binding, before.value)} before the write, so a DUT "
-                "that ignored the write would look the same at this step"
+                else f"it was already {_shown(binding, before.value)} before the write, so stale "
+                "can't change this step"
             )
         else:
             reading.note = f"its value {_shown(binding, received)} can't be shifted"

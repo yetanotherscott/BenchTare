@@ -44,7 +44,8 @@ def test_selftest_passes_on_the_healthy_reference(project):
     assert result.ret == 0
     result.stdout.fnmatch_lines(
         [
-            "*= BenchTare self-test passed in * s =*",
+            "*= BenchTare bench check passed =*",
+            "*= BenchTare harness check passed =*",
             "PASSED  loopback io.out4 -> io.in4: read back True and False",
             "PASSED  DUT sends Mode: Mode = 'standby' on io.in2",
         ]
@@ -75,7 +76,7 @@ def test_a_failed_selftest_exits_1(project):
     result = benchtare(project, "selftest", *CLI)
     assert result.ret == 1
     result.stdout.fnmatch_lines(
-        ["*= BenchTare self-test failed in * s =*", "FAILED  loopback io.out4 -> io.in4: *"]
+        ["*= BenchTare harness check failed =*", "FAILED  loopback io.out4 -> io.in4: *"]
     )
 
 

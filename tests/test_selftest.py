@@ -8,6 +8,7 @@ from benchtare import reference
 from benchtare.backends.base import BenchError
 from benchtare.bench.runtime import open_bench
 from benchtare.selftest import could_not_open, run_selftest
+from benchtare.selftest.checks import BENCH, FAILED, HARNESS, PASSED, SKIPPED
 
 HEALTHY_CAN = [
     ("equipment can0", "passed", "sim_can, healthy"),
@@ -51,7 +52,9 @@ def test_the_healthy_reference_passes_on_the_can_harness():
         result = run_selftest(bench)
     assert result.passed
     assert outcomes(result) == HEALTHY_CAN
-    assert result.summary() == "2 equipment items, 1 loopback, 2 presence checks, the simulated DUT"
+    assert result.summary(BENCH) == "2 equipment items, the simulated DUT"
+    assert result.summary(HARNESS) == "1 loopback, 2 presence checks"
+    assert (result.outcome_of(BENCH), result.outcome_of(HARNESS)) == (PASSED, PASSED)
 
 
 def test_the_healthy_reference_passes_on_the_io_harness():
@@ -59,7 +62,8 @@ def test_the_healthy_reference_passes_on_the_io_harness():
         result = run_selftest(bench)
     assert result.passed
     assert outcomes(result)[-1] == ("DUT sends Mode", "passed", "Mode = 'standby' on io.in2")
-    assert result.summary() == "2 equipment items, 1 loopback, 1 presence check, the simulated DUT"
+    assert result.summary(BENCH) == "2 equipment items, the simulated DUT"
+    assert result.summary(HARNESS) == "1 loopback, 1 presence check"
 
 
 def test_the_self_test_leaves_tests_a_clean_start():
@@ -113,6 +117,30 @@ def test_a_cut_loopback_wire_is_caught():
     assert (
         problem.hint == "the loopback wire from io.out4 to io.in4 (harness file harness-can.yaml)"
     )
+
+
+def test_a_cut_wire_fails_the_harness_check_not_the_bench_check():
+    with open_reference() as bench:
+        bench.simulation.cut("io.out4")
+        result = run_selftest(bench)
+    assert (result.outcome_of(BENCH), result.outcome_of(HARNESS)) == (PASSED, FAILED)
+    assert result.failed_areas() == [HARNESS]
+
+
+def test_failed_equipment_fails_the_bench_check_and_leaves_its_harness_checks_not_checked():
+    with open_reference(reference.HARNESS_CAN) as bench:
+        bench.simulation.fail("can0", "CAN interface not responding")
+        result = run_selftest(bench)
+    # The loopback on io still ran and passed, but the presence checks on can0 couldn't run:
+    # the harness isn't failed for a broken bench, nor passed.
+    assert (result.outcome_of(BENCH), result.outcome_of(HARNESS)) == (FAILED, SKIPPED)
+    assert result.failed_areas() == [BENCH]
+
+
+def test_a_bench_that_could_not_open_leaves_the_harness_check_not_run():
+    result = could_not_open(BenchError("no DAQ", hint="the USB cable"))
+    assert (result.outcome_of(BENCH), result.outcome_of(HARNESS)) == (FAILED, SKIPPED)
+    assert result.checks_of(HARNESS) == []
 
 
 def test_a_loopback_stuck_at_one_level_is_caught():

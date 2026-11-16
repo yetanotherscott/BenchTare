@@ -262,10 +262,12 @@ def test_bench_that_fails_to_open_stops_the_run_at_the_self_test(project):
     result.assert_outcomes()
     result.stdout.fnmatch_lines(
         [
-            "*= BenchTare self-test failed in * =*",
+            "*= BenchTare bench check failed =*",
             "FAILED  opening the bench: DAQ not found on USB",
             "        Check: the USB cable",
-            "*BenchTare's self-test failed, so no tests ran. What failed is listed above.*",
+            "*= BenchTare harness check not run =*",
+            "not checked, because the bench check failed",
+            "*BenchTare's bench check failed, so no tests ran. What failed is listed above.*",
         ]
     )
 
@@ -313,10 +315,8 @@ def test_the_self_test_runs_before_the_first_test(project):
     result.stdout.fnmatch_lines(
         [
             "collected 2 items",
-            (
-                "benchtare self-test passed: 2 equipment items, 1 loopback, 1 presence check, the "
-                "simulated DUT in * s"
-            ),
+            "benchtare bench check passed: 2 equipment items, the simulated DUT",
+            "benchtare harness check passed: 1 loopback, 1 presence check",
             "test_setpoint.py ..*",
         ]
     )
@@ -327,10 +327,11 @@ def test_verbose_runs_list_each_check(project):
     result.assert_outcomes(passed=2)
     result.stdout.fnmatch_lines(
         [
-            "*= BenchTare self-test passed in * s =*",
+            "*= BenchTare bench check passed =*",
             "PASSED  equipment can0: sim_can, healthy",
             "PASSED  equipment io: sim, healthy",
             "PASSED  simulated DUT reference: running",
+            "*= BenchTare harness check passed =*",
             "PASSED  loopback io.out4 -> io.in4: read back True and False",
             "PASSED  DUT sends Mode: Mode = 'standby' on io.in2",
             "test_setpoint.py::test_setpoint_is_tracked PASSED*",
@@ -345,14 +346,15 @@ def test_a_failed_self_test_stops_the_run_before_any_test(project):
     result.assert_outcomes()  # nothing ran
     result.stdout.fnmatch_lines(
         [
-            "*= BenchTare self-test failed in * s =*",
+            "*= BenchTare bench check passed =*",
             "PASSED  equipment can0: sim_can, healthy",
+            "*= BenchTare harness check failed =*",
             (
                 "FAILED  loopback io.out4 -> io.in4: drove True on io.out4, but io.in4 didn't read it "
                 "back within 1 s; it read nothing"
             ),
             "        Check: the loopback wire from io.out4 to io.in4 (harness file harness-io.yaml)",
-            "*BenchTare's self-test failed, so no tests ran. What failed is listed above.*",
+            "*BenchTare's harness check failed, so no tests ran. What failed is listed above.*",
         ]
     )
     assert "test_setpoint.py" not in result.stdout.str()
@@ -375,7 +377,13 @@ def test_selftest_only_runs_no_tests(project):
     project.makepyfile(test_setpoint="def test_would_fail(bench):\n    assert False\n")
     result = project.runpytest(*cli(), "--selftest-only")
     assert result.ret == pytest.ExitCode.OK
-    result.stdout.fnmatch_lines(["*= BenchTare self-test passed in * s =*", "*no tests ran*"])
+    result.stdout.fnmatch_lines(
+        [
+            "*= BenchTare bench check passed =*",
+            "*= BenchTare harness check passed =*",
+            "*no tests ran*",
+        ]
+    )
     assert "test_would_fail" not in result.stdout.str()
 
 
@@ -383,7 +391,7 @@ def test_selftest_only_fails_with_exit_code_1(project):
     project.makeconftest(CUT_LOOPBACK)
     result = project.runpytest_subprocess(*cli(), "--selftest-only")
     assert result.ret == pytest.ExitCode.TESTS_FAILED
-    result.stdout.fnmatch_lines(["*= BenchTare self-test failed in * s =*", "FAILED  loopback*"])
+    result.stdout.fnmatch_lines(["*= BenchTare harness check failed =*", "FAILED  loopback*"])
 
 
 def test_selftest_only_without_configuration_is_a_usage_error(pytester):
