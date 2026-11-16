@@ -1,10 +1,15 @@
 """The ``benchtare`` command.
 
+    benchtare init [FOLDER]
     benchtare selftest [pytest options]
     benchtare check-hygiene [pytest options]
     benchtare check-tests [pytest options]
 
-Both run through pytest, so they find the interface description, bench file and harness file
+``init`` writes a new project into FOLDER (by default the current folder): the quickstart, on
+the simulated reference DUT. It never overwrites a file. Exit codes: 0 when the project was
+written, 1 when it wasn't.
+
+The other three run through pytest, so they find the interface description, bench file and harness file
 exactly as a test run does: from ``--dut``, ``--bench`` and ``--harness``, or from the ini
 file. Any other options go to pytest: test paths and ``-k`` choose tests, ``-c`` chooses the ini
 file, and ``--log-cli-level=DEBUG`` shows BenchTare's own log.
@@ -28,11 +33,16 @@ run stopped, 4 when it couldn't start, and 5 when no tests were collected.
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
 
 from benchtare import __version__
+from benchtare.scaffold import InitError, init
+
+INIT_HELP = "write a new project, on the simulated reference DUT, to try BenchTare out"
 
 SELFTEST_HELP = "check the bench and the harness, without running any test"
 CHECK_TESTS_HELP = "prove each test can fail, by rerunning it with what it reads corrupted"
@@ -47,6 +57,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--version", action="version", version=f"benchtare {__version__}")
     commands = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
+    init_command = commands.add_parser(
+        "init",
+        help=INIT_HELP,
+        description=f"Write the quickstart: {INIT_HELP}. It is a complete project, with an "
+        "interface description, a bench file, a harness file, staging fixtures and one test. It "
+        "never overwrites a file.",
+        epilog="Exit codes: 0 written, 1 not written.",
+    )
+    init_command.add_argument(
+        "folder",
+        nargs="?",
+        default=".",
+        type=Path,
+        help="where to write it, created if needed (default: the current folder)",
+    )
     commands.add_parser(
         "selftest",
         help=SELFTEST_HELP,
@@ -78,6 +103,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "2 stopped, 4 couldn't start, 5 no tests.",
     )
     args, rest = parser.parse_known_args(argv)
+    if args.command == "init":
+        if rest:
+            parser.error(f"init takes only a folder, not {' '.join(rest)}")
+        return _init(args.folder)
     if args.command == "selftest":
         return int(pytest.main(["--selftest-only", "-p", "no:cacheprovider", *rest]))
     if args.command == "check-hygiene":
@@ -86,6 +115,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(pytest.main(["--check-tests", "-p", "no:cacheprovider", *rest]))
     parser.error(f"unknown command {args.command}")  # argparse rejects these first
     return 2  # pragma: no cover
+
+
+def _init(folder: Path) -> int:
+    try:
+        written = init(folder)
+    except InitError as exc:
+        print(f"benchtare init: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(
+            f"benchtare init: couldn't write the project to {folder}: {exc}. Check the "
+            "folder's path, and that it can be written to.",
+            file=sys.stderr,
+        )
+        return 1
+    here = folder.resolve() == Path.cwd().resolve()
+    print(
+        f"Wrote a BenchTare project to {folder}: {len(written)} files, on the simulated "
+        "reference DUT. To run it:"
+    )
+    print()
+    if not here:
+        print(f"    cd {folder}")
+    print("    pytest                     # the self-test, then the test")
+    print("    benchtare check-hygiene    # the test stands on its own")
+    print("    benchtare check-tests      # the test can fail at every check")
+    print()
+    print(
+        f"{folder / 'README.md'} says what each file is, and what to break to see each check work."
+    )
+    return 0
 
 
 if __name__ == "__main__":

@@ -1,0 +1,27 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: REFDEV BENCH
+
+BO_ 256 Command: 8 BENCH
+ SG_ Setpoint : 0|16@1- (0.1,0) [-3276.8|3276.7] "degC" REFDEV
+ SG_ ModeRequest : 16|2@1+ (1,0) [0|3] "" REFDEV
+
+BO_ 257 Status: 8 REFDEV
+ SG_ Measured : 0|16@1- (0.1,0) [-3276.8|3276.7] "degC" BENCH
+
+BO_ 258 Heartbeat: 8 REFDEV
+ SG_ Mode : 0|2@1+ (1,0) [0|3] "" BENCH
+ SG_ SwVersion : 8|16@1+ (1,0) [0|65535] "" BENCH
+
+CM_ "The BenchTare reference DUT. See benchtare/reference/device.py.";
+CM_ BO_ 256 "Sent by the bench to command the DUT.";
+CM_ BO_ 257 "The DUT's answer to each Command.";
+CM_ BO_ 258 "Sent by the DUT every heartbeat period once it has booted.";
+CM_ SG_ 258 SwVersion "The DUT's software version: 102 is 1.0.2.";
+
+VAL_ 256 ModeRequest 0 "standby" 1 "run" ;
+VAL_ 258 Mode 0 "standby" 1 "run" ;

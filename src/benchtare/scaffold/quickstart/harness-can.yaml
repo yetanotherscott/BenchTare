@@ -1,0 +1,21 @@
+# The reference DUT on the simulated bench, with its CAN signals on the virtual CAN bus.
+
+harness: reference-can
+
+connections:
+  Setpoint: can0
+  ModeRequest: can0
+  Measured: can0
+  Mode: can0
+  SwVersion: can0
+  supply_enable: io.out1
+  supply_ok: io.in1
+
+loopbacks:
+  - {drive: io.out4, read: io.in4}
+
+presence:
+  - {bus: can0, within: 1.0}
+  - {signal: Mode, within: 2.0}
+
+simulate: reference

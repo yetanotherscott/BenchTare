@@ -2,11 +2,10 @@
 
 A self-verifying HIL/SIL test framework for embedded systems, built on pytest.
 
-**Status: in development, not released yet.** Most of the first slice is
-built: everything below runs on a laptop, against a simulated reference DUT or
-a team's own DUT model. Next is a quickstart (`benchtare init`); hardware
-backends come after the first slice. It runs on Linux, Windows and macOS, with
-Python 3.10 or later and pytest 7.4 or later.
+**Status: in development, not released yet.** The first slice is built:
+everything below runs on a laptop, against a simulated reference DUT or a
+team's own DUT model. Hardware backends come after it. It runs on Linux,
+Windows and macOS, with Python 3.10 or later and pytest 7.4 or later.
 
 ## What it does
 
@@ -40,6 +39,32 @@ simulation, and proves that its own results can be trusted.
   and the DUT's hardware and software versions.
 - **Requirements are optional,** and planned: tests will trace to them when you
   have them.
+
+## Quickstart
+
+BenchTare isn't on PyPI yet, so install it from GitHub, preferably into a
+virtual environment. Then write the quickstart project and run it:
+
+```bash
+pip install git+https://github.com/yetanotherscott/BenchTare
+benchtare init demo
+cd demo
+pytest
+```
+
+`benchtare init` writes a complete project on the simulated reference DUT, so
+no hardware is needed: an interface description, a bench file, a harness file,
+staging fixtures in `conftest.py`, and one test. `pytest` runs the self-test,
+then the test. Two more commands check the test itself:
+
+```bash
+benchtare check-hygiene
+benchtare check-tests
+```
+
+The first proves the test stands on its own, and the second proves it can
+fail. The project's own README says what each file is, and suggests three ways
+to break the project, each caught by a different check.
 
 ## Commands
 

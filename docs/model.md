@@ -752,7 +752,9 @@ BenchTare ships a simulated **reference** DUT inside the package, in
 - two harness files, `harness-can.yaml` and `harness-io.yaml`.
 
 It's used for the quickstart (`benchtare init`) and for BenchTare's own test
-suite, so nothing needs hardware.
+suite, so nothing needs hardware. The quickstart copies these files, with a
+`clean_state:` added to the interface description, and adds staging fixtures,
+one test and a `pytest.ini` naming the three files.
 
 The reference DUT behaves simply and predictably:
 

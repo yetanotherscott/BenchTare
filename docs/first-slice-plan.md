@@ -409,22 +409,42 @@ hygiene check all run without hardware.
   another state before a test's setup, to see whether staging recovers it),
   opt-in and on models only.
 
-### M9: Scaffold and acceptance
+### M9: Scaffold and acceptance (done, apart from the acceptance check)
 
-- `benchtare init <dir>` writes the packaged quickstart: an interface
-  description, a bench file, a harness file, a `conftest.py` with a staging
-  fixture, and one passing test, all on the reference.
-- Write the quickstart section of the README.
-- CI job:
+- `benchtare init [folder]` writes the packaged quickstart
+  (`benchtare/scaffold/quickstart/`), by default into the current folder. It is
+  a complete project on the reference: the interface description with a
+  `clean_state:`, its DBC, a bench file, a harness file, a `conftest.py` with
+  staging fixtures, one passing test, a `pytest.ini` naming the three files,
+  and a README saying what each file is and suggesting three ways to break the
+  project, each caught by a different check. It never overwrites a file: if
+  any file it would write is already there, it writes nothing and says which.
+- The README has a quickstart section. Until BenchTare is on PyPI, it installs
+  from GitHub.
+- Tests:
+  - the quickstart's bench file, harness file and DBC are the reference's own,
+    and its interface description is the reference's plus `clean_state:`;
+  - its test files need no BenchTare imports;
+  - `init` refuses a folder that already has one of its files, a file given as
+    the folder, and a file that appears while it writes;
+  - the written project passes `pytest`, `benchtare check-hygiene` and
+    `benchtare check-tests`, each run as a separate process;
+  - each break the quickstart's README suggests is caught as it says.
+- CI job, on Linux, Windows and macOS:
   1. build the wheel;
-  2. install it in a fresh virtual environment;
+  2. install it in a fresh virtual environment, outside the checkout;
   3. run `benchtare init demo`, `cd demo`, `pytest`, which must pass;
   4. run `benchtare check-hygiene`, which must pass;
   5. run `benchtare check-tests`, which must report the test as able to fail.
-- **Acceptance check:** on a clean machine, `pip install benchtare`,
-  `benchtare init demo`, `cd demo`, `pytest` gives a passing test in under 15
-  minutes, for someone who knows pytest and has never seen the tool. The
-  hygiene check then passes, and the test check shows that the test can fail.
+- Found along the way: a test in M8's thermostat project waited for a pulse
+  only 40 ms long on a channel the simulated equipment samples every 10 ms, and
+  a slow CI machine missed it. The pulse is now about 450 ms.
+- **Acceptance check, still to do by hand:** on a clean machine,
+  `pip install benchtare`, `benchtare init demo`, `cd demo`, `pytest` gives a
+  passing test in under 15 minutes, for someone who knows pytest and has never
+  seen the tool. The hygiene check then passes, and the test check shows that
+  the test can fail. It needs the release on PyPI; until then, install from
+  GitHub as the README says.
 
 ### M10 (optional): Requirements and trace report
 

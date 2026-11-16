@@ -46,3 +46,35 @@ jobs:
       - run: pip install -e ".[dev]" "pytest==7.4.*"
       - run: pytest --version
       - run: pytest
+
+  # The quickstart as a new user gets it: the built wheel, installed in a fresh virtual
+  # environment and run outside the checkout, so nothing comes from the source tree.
+  quickstart:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel
+        run: python -m pip wheel . --no-deps --wheel-dir "$RUNNER_TEMP/wheels"
+      - name: Install it in a fresh virtual environment, and run the quickstart
+        run: |
+          cd "$RUNNER_TEMP"
+          python -m venv venv
+          if [ -f venv/Scripts/activate ]; then . venv/Scripts/activate; else . venv/bin/activate; fi
+          pip install wheels/benchtare-*.whl
+          python -c "import benchtare; print(benchtare.__file__); assert 'site-packages' in benchtare.__file__"
+          benchtare init demo
+          cd demo
+          pytest
+          benchtare check-hygiene
+          benchtare check-tests | tee check-tests.txt
+          grep "Test check: 1 able to fail" check-tests.txt
