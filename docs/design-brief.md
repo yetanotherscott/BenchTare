@@ -155,8 +155,8 @@ passing test in under 15 minutes. The hygiene check then passes, and the test
 check shows that the test can fail.
 
 **Status:** items 1 to 7 are built, and run in CI on Linux, Windows and macOS.
-Item 8 is optional (M10). The acceptance check by hand is still to do: it needs
-the release on PyPI.
+Item 8 is optional (M10). BenchTare is on PyPI, and the acceptance check by
+hand is still to do.
 
 See [first-slice-plan.md](first-slice-plan.md) for the build order.
 

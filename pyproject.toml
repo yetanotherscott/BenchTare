@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "benchtare"
-version = "0.0.1"
+version = "0.0.2"
 description = "A self-verifying HIL/SIL test framework for embedded systems, built on pytest."
 readme = "README.md"
 license = "MIT"
@@ -36,6 +36,7 @@ dependencies = [
 Homepage = "https://github.com/yetanotherscott/BenchTare"
 Source = "https://github.com/yetanotherscott/BenchTare"
 Issues = "https://github.com/yetanotherscott/BenchTare/issues"
+Changelog = "https://github.com/yetanotherscott/BenchTare/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "ruff"]
@@ -49,10 +50,11 @@ benchtare = "benchtare.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/benchtare"]
 
-# Only what building and testing from source needs, so a local build never picks up stray files.
+# Only what building and testing from source needs (the tests read CHANGELOG.md), so a local
+# build never picks up stray files.
 # pyproject.toml, README.md and LICENSE are always included.
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/tests", "/docs"]
+include = ["/src", "/tests", "/docs", "/CHANGELOG.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

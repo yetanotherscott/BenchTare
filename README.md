@@ -93,6 +93,8 @@ Three more commands use the same files and settings:
   what is being built first, and in what order.
 - [Results schema](https://github.com/yetanotherscott/BenchTare/blob/main/docs/results-schema.md):
   what each run stores in the results database.
+- [Changelog](https://github.com/yetanotherscott/BenchTare/blob/main/CHANGELOG.md): what
+  changed in each release.
 
 ## License
 

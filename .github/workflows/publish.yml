@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Check the release's tag matches the package version
+      - name: Check the release's tag matches the package version, and the changelog has it
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: |
@@ -27,6 +27,11 @@ jobs:
           if [ "$TAG" != "v$version" ]; then
             echo "The release's tag is $TAG, but pyproject.toml says version $version." \
               "Tag the release v$version, or change the version in pyproject.toml first."
+            exit 1
+          fi
+          if ! grep -qF "## [$version] - " CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [$version] - YYYY-MM-DD' section." \
+              "Move the Unreleased lines under it before releasing."
             exit 1
           fi
       # build and twine run here only; neither is a dependency of BenchTare.

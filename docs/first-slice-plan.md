@@ -461,8 +461,7 @@ hygiene check all run without hardware.
   `pip install benchtare`, `benchtare init demo`, `cd demo`, `pytest` gives a
   passing test in under 15 minutes, for someone who knows pytest and has never
   seen the tool. The hygiene check then passes, and the test check shows that
-  the test can fail. It needs the release on PyPI; until then, install from
-  GitHub as the README says.
+  the test can fail. BenchTare is on PyPI from 0.0.1, so it can be done now.
 
 ### M10 (optional): Requirements and trace report
 
@@ -516,13 +515,12 @@ Do not build these yet, even where the design brief describes them:
   running tests in another order; active disruption for hygiene (design brief,
   later stage 4).
 
-## Before the first release
+## Around the first release
 
 - [x] Confirm `benchtare` is free on PyPI and on GitHub.
 - [x] Create the GitHub repository.
-- [ ] Publish the 0.0.1 placeholder to PyPI so that `pip install benchtare`
-      resolves to this project.
+- [x] Publish to PyPI, so that `pip install benchtare` resolves to this
+      project: 0.0.1, by trusted publishing from a GitHub release.
 - [ ] Spend an hour with jamb and Jumpstarter, to confirm the prior-art
       assessment from hands-on use.
-- [ ] Run the acceptance check by hand (M9), once `pip install benchtare`
-      works.
+- [ ] Run the acceptance check by hand (M9).
