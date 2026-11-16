@@ -63,7 +63,7 @@ def test_the_quickstart_interface_description_is_the_references_plus_clean_state
 def test_only_the_quickstarts_files_are_copied_not_what_a_run_left_there(tmp_path, monkeypatch):
     folder = tmp_path / "quickstart"
     folder.mkdir()
-    (folder / "conftest.py").write_text("# staging\n")
+    (folder / "conftest.py").write_bytes(b"# staging\n")  # bytes: no \r\n on Windows
     for left in ("__pycache__", ".benchtare", ".pytest_cache"):
         (folder / left).mkdir()
         (folder / left / "x").write_text("left by a run\n")
