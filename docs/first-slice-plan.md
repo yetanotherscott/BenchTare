@@ -36,12 +36,14 @@ backend in the package.
 
 ```
 benchtare/
+├── CHANGELOG.md             # Keep a Changelog; versions follow Semantic Versioning
 ├── CLAUDE.md
 ├── LICENSE
 ├── README.md
 ├── pyproject.toml
 ├── .github/workflows/
-│   └── ci.yml               # lint; tests on Linux, Windows and macOS; the quickstart from the wheel
+│   ├── ci.yml               # lint; tests on Linux, Windows and macOS; the quickstart from the wheel
+│   └── publish.yml          # a GitHub release, uploaded to PyPI by trusted publishing
 ├── docs/
 │   ├── design-brief.md
 │   ├── model.md
@@ -437,8 +439,7 @@ hygiene check all run without hardware.
   and a README saying what each file is and suggesting three ways to break the
   project, each caught by a different check. It never overwrites a file: if
   any file it would write is already there, it writes nothing and says which.
-- The README has a quickstart section. Until BenchTare is on PyPI, it installs
-  from GitHub.
+- The README has a quickstart section, which installs BenchTare from PyPI.
 - Tests:
   - the quickstart's bench file, harness file and DBC are the reference's own,
     and its interface description is the reference's plus `clean_state:`;
@@ -483,7 +484,9 @@ Only after M9 passes.
 Do not build these yet, even where the design brief describes them:
 
 - Real hardware backends and DAQ devices.
-- Transports other than virtual CAN (serial, sockets, MQTT).
+- Transports other than virtual CAN: serial, sockets, MQTT and SSH (design
+  brief, later stage 3). M7's state probes are hooks the team writes, reached
+  however it likes.
 - Protocols above raw CAN signals (CANopen, Modbus, UDS, J1939, ISOBUS),
   including any `standards:` value in an interface description.
 - Interface-level fault stimuli, such as dropping or stopping a CAN message.
@@ -509,8 +512,6 @@ Do not build these yet, even where the design brief describes them:
 - A more realistic reference for exercising test hygiene: measurement noise,
   settling ramps, a fault that latches until a supply cycle, a free-running
   counter, and state only a probe can read (design brief, later stage 4).
-- Transports beyond virtual CAN, including SSH (design brief, later stage 3).
-  M7's state probes are hooks the team writes, reached however it likes.
 - Replaying recorded readings in the test check, for signals that need it;
   running tests in another order; active disruption for hygiene (design brief,
   later stage 4).

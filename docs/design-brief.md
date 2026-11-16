@@ -22,7 +22,8 @@ It is for small embedded teams that need certification-grade evidence and
 cannot afford a commercial HIL toolchain or a dedicated test-infrastructure
 engineer. It should also hold up for enterprise teams in large organizations.
 
-Status: second draft.
+Status: the first slice is built and published on PyPI. The later stages are
+proposals.
 
 ## Goals
 
@@ -170,7 +171,7 @@ proposal.
 | 2 | Backends | First hardware: SocketCAN plus two dissimilar low-cost DAQ devices, to prove the capability interface. The test check on real equipment needs an explicit opt-in, since a corrupted reading can lead a test to send a stimulus it normally wouldn't. The hygiene check is run on a real DUT, as acceptance |
 | 3 | Transports | Transport plugin interface, with serial, TCP/UDP sockets, MQTT and SSH as the first plugins. SSH lets an interface description or harness reach an embedded Linux target, for signals and for test hygiene's state probes |
 | 4 | Self-verification | Standard interface fault stimuli, such as dropped or stopped CAN messages; the shipped reference extended to cover each new backend and transport. For test hygiene: a more realistic reference (measurement noise, settling ramps, a fault that latches until a supply cycle, a free-running counter, state only a probe can read), running tests in other orders, and active disruption on DUT models. For the test check: replaying recorded readings, for signals that need it |
-| 5 | Requirements | ReqIF, StrictDoc and Sphinx-Needs importers; trace report |
+| 5 | Requirements | ReqIF, StrictDoc and Sphinx-Needs importers, feeding the trace report M10 builds from Doorstop |
 | 6 | Analysis | Remote database option; trends for pass rate, duration and measured values |
 | 7 | Protocols | CANopen and Modbus, each with a CI reference; J1939 and ISOBUS considered after that. Each standard brings the valid ranges and special values (such as "error" and "not available") it defines for its signals: tests can read them instead of retyping the standard, and an interface description can override them per signal |
 | 8 | Community | Backend and adapter guides; write-back adapters from contributors |
@@ -263,8 +264,8 @@ not from hands-on evaluation.
 
 **Open questions**
 
-- [x] Confirm the name is free on PyPI and GitHub. (Reserving it on PyPI is
-      still to do.)
+- [x] Confirm the name is free on PyPI and GitHub, and reserve it: BenchTare
+      is published on PyPI.
 - [ ] Standalone project, or built on Jumpstarter's driver model?
 - [ ] Which two dissimilar low-cost DAQ devices prove the capability interface first?
 - [ ] Which transport plugin ships second, after virtual CAN?

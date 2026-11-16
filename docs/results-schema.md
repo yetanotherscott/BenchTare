@@ -1,11 +1,11 @@
 # Results schema
 
 **Status: version 3 is built (M7).** Version 1 (M5) is the schema below;
-version 2 adds the test check and version 3 the hygiene check (see below), and
-M10 will add version 4 (requirements). A new database is created at version 1
-and brought up through the same migrations as an old one, so every database
-ends up the same. Changing it means a new version and a migration, never a
-silent change.
+version 2 adds the test check and version 3 the hygiene check (see below).
+Later changes, such as M10's requirements, take the next version when they
+are built. A new database is created at version 1 and brought up through the
+same migrations as an old one, so every database ends up the same. Changing it
+means a new version and a migration, never a silent change.
 
 ## What it has to serve
 
@@ -371,9 +371,12 @@ Migration 2 to 3 adds:
 - **The repeat run's record** goes into `record_entries` with the phases
   `repeat setup`, `repeat call` and `repeat teardown`.
 
-## Later versions (designed now, built in their milestones)
+## Later changes (designed now, numbered when built)
 
-- **Version 4, M10** — `test_requirements`: `run_id`, `test_seq`,
+A planned change takes the next schema version when it is built, so the
+numbers follow the order changes land in, not the order they were planned.
+
+- **M10, requirements** — `test_requirements`: `run_id`, `test_seq`,
   `requirement_id`.
 
 ## Versions and migrations
