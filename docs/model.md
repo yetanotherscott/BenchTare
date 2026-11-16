@@ -152,7 +152,9 @@ The first slice has two backends, both simulated. Hardware backends come later
 behind the same interface.
 
 - **`sim`** is simulated I/O with named channels. Its read channels are sampled
-  continuously, like a DAQ.
+  continuously, like a DAQ: every 10 ms by default, or `sample_period:` seconds.
+  So, as on a real DAQ, a value that lasts less than a sample period or two can
+  be missed. Wait for a state that lasts, not for a short pulse.
 - **`sim_can`** is a virtual CAN bus. Each bench gets a bus of its own, so two
   benches in one process never hear each other. Like a real interface, it
   carries CAN FD frames only with `fd: true`. It ignores python-can's own
@@ -427,8 +429,8 @@ file.
 
 - **Each report carries its phase's record** as `report.benchtare_record`: a
   list of plain dicts with the kind of entry, its level, the time, the text, and
-  the facts (signal, value, unit, channel, and so on). M5 stores them with the
-  results.
+  the facts (signal, value, unit, channel, and so on). It is stored with the
+  run's results.
 - **Passing asserts** are recorded when the ini file sets pytest's
   `enable_assertion_pass_hook = true`. Without it, the record has the values a
   test read and its outcome, but not each comparison a plain `assert` made.
@@ -695,7 +697,7 @@ on the roadmap (design brief, later stages 7 and 13).
 This is the area of interest. Tests are plain pytest, run as usual, and their
 results are stored. A usual run's summary says which of the four areas
 beneath it are covered: the self-test of this session, and which test files
-have never had their logic checked, or have changed since.
+have never had their hygiene or their logic checked, or have changed since.
 
 ## Results and the manifest
 

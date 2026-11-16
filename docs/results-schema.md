@@ -383,8 +383,10 @@ Migration 2 to 3 adds:
   step by step, inside one transaction. A failed migration leaves the original
   untouched.
 - **A newer file** (written by a newer BenchTare) is refused, and nothing is
-  written: "this results database is schema 3, and this BenchTare reads up to
-  2. Check: upgrade BenchTare, or point `--results` at another file."
+  written: "results database .benchtare/results.sqlite3 is schema version 4,
+  written by a newer BenchTare; this BenchTare (0.0.1) reads up to version 3,
+  so it won't write to it", with what to check: upgrade BenchTare, point
+  `--results` at another file, or run with `--no-results`.
 - **A file that isn't a BenchTare database**, or is corrupt, is refused with a
   message naming the file, and left exactly as it was. (Switching a file to
   SQLite's WAL mode rewrites its header, so that happens only once the file is

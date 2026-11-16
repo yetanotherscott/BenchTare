@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 authors = [{ name = "Drew Scott" }]
 keywords = ["hil", "sil", "embedded", "testing", "pytest", "can", "hardware-in-the-loop"]
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 2 - Pre-Alpha",
     "Framework :: Pytest",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",

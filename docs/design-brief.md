@@ -2,8 +2,8 @@
 
 This is a Markdown copy of the design brief, kept with the code so that the
 goals and constraints travel with the repository. The terms it uses (DUT,
-signal, bench, harness, staging, self-test, test check) are defined in
-[model.md](model.md).
+signal, bench, harness, staging, self-test, hygiene check, test check) are
+defined in [model.md](model.md).
 
 ## Purpose
 
@@ -154,6 +154,10 @@ installs it, runs the scaffold command on the example project, and has a
 passing test in under 15 minutes. The hygiene check then passes, and the test
 check shows that the test can fail.
 
+**Status:** items 1 to 7 are built, and run in CI on Linux, Windows and macOS.
+Item 8 is optional (M10). The acceptance check by hand is still to do: it needs
+the release on PyPI.
+
 See [first-slice-plan.md](first-slice-plan.md) for the build order.
 
 ## Later stages
@@ -199,6 +203,10 @@ first slice is designed, kept here until the guide is written:
 - **Boundary tests are ordinary tests.** Values above and below a range, at its
   limits and in between come from the requirement or the standard, and go in
   a parametrized test. The test check then proves each case can fail.
+- **Wait for states that last, not short pulses.** A sampled channel, on a
+  DAQ or the simulated `sim` equipment, can miss a value that lasts less than
+  a sample period or two. Wait for a state the DUT holds, or for the pulse's
+  effect, rather than for the pulse itself.
 
 ## Prior art
 
@@ -237,8 +245,10 @@ not from hands-on evaluation.
   in 2026. Traceability is a secondary feature here. The value is a complete
   bench that proves its own reliability.
 - **Self-verification depth.** Proving a test bench reliable can grow without
-  limit. The first slice limits it to a self-test, a run manifest and one
-  injected fault.
+  limit. The first slice limits it to the self-test, the hygiene check and the
+  test check, against simulated equipment and DUT models, plus a run manifest.
+  Deeper checks, such as active disruption and a more realistic reference, are
+  later stage 4.
 
 **Decided**
 
@@ -249,7 +259,7 @@ not from hands-on evaluation.
   uses.
 - The reference bench is simulated and ships with the project.
 - Run history goes to a database, local by default and remote by
-  configuration.
+  configuration. The local database is SQLite.
 
 **Open questions**
 
@@ -259,7 +269,8 @@ not from hands-on evaluation.
 - [ ] Which two dissimilar low-cost DAQ devices prove the capability interface first?
 - [ ] Which transport plugin ships second, after virtual CAN?
 - [ ] Is a hardware reference bench needed later?
-- [ ] Which local database is the default? (SQLite is assumed in the first-slice plan.)
+- [x] Which local database is the default? SQLite: the first slice is built on
+      it.
 - [ ] Which IDEs get a ready-made setup first?
 - [ ] What should the GUI cover first, and should it be a desktop app or a local web page?
 - [x] When should CI start testing on Windows and macOS? From the first slice:

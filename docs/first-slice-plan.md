@@ -16,7 +16,7 @@ start, and each is easy to change early.
 
 | Assumption | Why | Change cost |
 | --- | --- | --- |
-| SQLite is the default local database | It is in the Python standard library, so there is nothing to install | Low, if the store sits behind an interface |
+| SQLite is the default local database (confirmed: the first slice is built on it) | It is in the Python standard library, so there is nothing to install | Low, if the store sits behind an interface |
 | Python 3.10 or newer | Structural pattern matching and modern typing | Low |
 | Linux, Windows and macOS, tested in CI | The first slice is pure Python on simulated equipment, so it costs little to keep all three working from the start | Low now, higher once hardware backends exist |
 | Standalone project, not built on Jumpstarter | Keeps the first slice free of a large dependency | Medium |
@@ -40,12 +40,17 @@ benchtare/
 ├── LICENSE
 ├── README.md
 ├── pyproject.toml
+├── .github/workflows/
+│   └── ci.yml               # lint; tests on Linux, Windows and macOS; the quickstart from the wheel
 ├── docs/
 │   ├── design-brief.md
 │   ├── model.md
-│   └── first-slice-plan.md
+│   ├── first-slice-plan.md
+│   └── results-schema.md
 ├── src/benchtare/
 │   ├── __init__.py
+│   ├── __main__.py          # python -m benchtare
+│   ├── _yaml.py             # reading YAML files, with errors that say where
 │   ├── signals/
 │   │   └── model.py         # Signal and SignalSet
 │   ├── dut/
@@ -63,8 +68,9 @@ benchtare/
 │   │   ├── sim_can.py       # virtual CAN bus through python-can
 │   │   └── _can_codec.py    # DBC encoding and frame receiving, shared by both CAN sides
 │   ├── sim/
-│   │   ├── registry.py      # simulated DUTs a harness can plug in
-│   │   └── simulation.py    # wires a simulated DUT to simulated equipment
+│   │   ├── model.py         # DutModel: the base class for DUT models
+│   │   ├── registry.py      # DUT models that ship with BenchTare
+│   │   └── simulation.py    # wires a DUT model to simulated equipment
 │   ├── reference/
 │   │   ├── device.py        # the simulated reference DUT
 │   │   ├── reference.dut.yaml
@@ -75,16 +81,19 @@ benchtare/
 │   ├── selftest/
 │   │   └── checks.py        # bench check and harness check
 │   ├── testcheck.py         # the test check: corruption modes and verdicts
+│   ├── hygiene.py           # the hygiene check: rules, clean-state items, verdicts
+│   ├── hookspecs.py         # pytest_benchtare_state, for state probes
 │   ├── results/
 │   │   ├── schema.py        # the results schema, versioned
 │   │   ├── manifest.py      # versions and file hashes
 │   │   └── store.py         # ResultStore protocol and SQLite implementation
 │   ├── scaffold/
+│   │   ├── __init__.py      # benchtare init
 │   │   └── quickstart/      # what `benchtare init` writes
 │   ├── requirements/        # optional, milestone M10
 │   ├── record.py            # the test record: levels, entries
 │   ├── plugin.py            # pytest plugin: options, fixtures, hooks
-│   └── cli.py               # init, selftest, check-tests, report
+│   └── cli.py               # init, selftest, check-hygiene, check-tests; report in M10
 └── tests/                   # BenchTare's own tests, run against the reference
 ```
 
@@ -128,10 +137,19 @@ implementations without changing them.
     equipment.
 - **`ResultStore`** (`results/store.py`): `start_run`, then `add_environment`,
   `add_manifest_files`, `add_equipment`, `add_selftest`, `add_test`,
-  `add_record` and `add_identity` as the run goes, and `finish_run`. SQLite is
-  the only implementation in this slice. M10 adds requirement IDs.
+  `add_record` and `add_identity` as the run goes, `add_checks` and
+  `add_hygiene` for the two on-demand checks, and `finish_run`;
+  `check_status` says when each test file was last checked. SQLite is the only
+  implementation in this slice. M10 adds requirement IDs.
 - **`Backend.identity()`**: the equipment's vendor, model, serial number,
   firmware and driver, as far as the backend can tell.
+- **`DutModel`** (`sim/model.py`, exported as `benchtare.DutModel`): a team
+  overrides `started()` and `on_input(name, value)`, and calls `publish`,
+  `after` and `every`. All of a model's code runs on one thread. The harness
+  file's `simulate:` names one.
+- **`pytest_benchtare_state(bench, config)`** (`hookspecs.py`): a hook the team
+  writes in `conftest.py`, returning named values for the hygiene check's state
+  probes.
 
 ## Order of work
 
@@ -506,3 +524,5 @@ Do not build these yet, even where the design brief describes them:
       resolves to this project.
 - [ ] Spend an hour with jamb and Jumpstarter, to confirm the prior-art
       assessment from hands-on use.
+- [ ] Run the acceptance check by hand (M9), once `pip install benchtare`
+      works.

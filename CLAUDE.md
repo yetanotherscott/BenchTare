@@ -15,9 +15,10 @@ Read these before making design decisions:
 
 ## Current scope
 
-Work through the milestones in `docs/first-slice-plan.md` in order (M0 is done;
-M1 to M9, then optional M10). Finish and commit one milestone before starting
-the next.
+The milestones in `docs/first-slice-plan.md` are done through M9. What's left
+of the slice is the acceptance check, by hand. M10 (requirements and the trace
+report) is optional: start it only when asked. Finish and commit one milestone
+before starting the next.
 
 The plan has an "Out of scope for this slice" list. Do not build anything on
 it, even if the design brief describes it. If a task seems to need something
@@ -128,7 +129,7 @@ Do not reopen these without being asked:
 - One install: python-can (LGPL-3.0, an unmodified dependency) and cantools
   are regular dependencies, not extras.
 - Run history goes to a database: local by default, remote by configuration.
-  SQLite is assumed as the local default.
+  SQLite is the local default.
 - BenchTare verifies five areas, each on its own and in this order: the bench,
   the harness, test hygiene, test logic, and the DUT. The DUT is the area of
   interest; the other four are there so its results reflect physical reality.
