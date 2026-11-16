@@ -81,7 +81,7 @@ benchtare/
 │   │   └── store.py         # ResultStore protocol and SQLite implementation
 │   ├── scaffold/
 │   │   └── quickstart/      # what `benchtare init` writes
-│   ├── requirements/        # optional, milestone M9
+│   ├── requirements/        # optional, milestone M10
 │   ├── record.py            # the test record: levels, entries
 │   ├── plugin.py            # pytest plugin: options, fixtures, hooks
 │   └── cli.py               # init, selftest, check-tests, report
@@ -129,7 +129,7 @@ implementations without changing them.
 - **`ResultStore`** (`results/store.py`): `start_run`, then `add_environment`,
   `add_manifest_files`, `add_equipment`, `add_selftest`, `add_test`,
   `add_record` and `add_identity` as the run goes, and `finish_run`. SQLite is
-  the only implementation in this slice. M9 adds requirement IDs.
+  the only implementation in this slice. M10 adds requirement IDs.
 - **`Backend.identity()`**: the equipment's vendor, model, serial number,
   firmware and driver, as far as the backend can tell.
 
@@ -346,37 +346,98 @@ bench gained a fifth input, `io.in5`, so the IO harness carries it too.
 
 ### M7: Test hygiene
 
-The fourth of the areas BenchTare verifies (see "What BenchTare verifies" in
+The third of the areas BenchTare verifies (see "What BenchTare verifies" in
 `docs/model.md`): that each test stands on its own. It is checked on its own,
 with its own verdicts, report and stored results, separately from the bench
-and harness (M4) and from test logic (M6).
+and harness (M4) and from test logic (M6). M7 is about getting the logic of the
+checks right; a more realistic reference to exercise them against comes later.
 
-- `pytest --check-hygiene` and `benchtare check-hygiene` run the tests, then
-  check each one that passed:
-  - **It repeats:** it passes when run again straight after itself, and takes
-    the same readings in the same order.
-  - **It leaves nothing behind:** once its teardown ends, every DUT input it
-    wrote is back at its value from before setup.
-  - **Its staging sets a meaningful starting point:** at each checked reading,
-    the value from before the test's most recent write differs from what the
-    test accepted, so the test can tell whether the DUT responded.
-- The test check keeps its control rerun, which it needs to trust its own
-  reruns, and keeps reporting a test that doesn't repeat as "not checked,
-  because of test hygiene". The hygiene check is where hygiene fails a run.
+**What a clean DUT is.** The interface description gets a `clean_state:` list
+of the signals that indicate the DUT is clean, by name only, like `identity:`.
+Only these are compared, so nothing is tested beyond what the team says
+matters. As a list, or as a mapping when an item needs options:
+
+```yaml
+clean_state:
+  Mode:
+  supply_enable:
+  Measured: {tolerance: 0.1, settle: 2.0}
+  fault_log:            # a state probe, not a signal
+```
+
+- `tolerance:` (numbers only): how far apart two values may be and still be the
+  same, for a noisy reading. The team's definition of "the same", not a pass
+  criterion. Default 0: exactly equal. Bools, enums and text always compare
+  exactly.
+- `settle:` (seconds): how long after teardown the item has to come back before
+  it counts as left behind. Default 1.0, like other timeouts.
+- An output's value before setup is the latest value received; after teardown,
+  the check waits up to `settle:` for a value that matches. An input's value is
+  the one the bench last wrote; an input never written before the test has no
+  known clean value, and is reported as not compared.
+- **State probes** cover state that no signal shows, such as a file on an
+  embedded Linux target, a parameter in NVM or a stored fault code. The team
+  implements a hook in `conftest.py` that returns named values, reached however
+  the team likes (SSH, a serial console, UDS). BenchTare calls it before setup
+  and after teardown (again until `settle:` runs out), and compares the names
+  listed in `clean_state:`. BenchTare owns the comparison, the team owns the
+  access.
+
+**The three rules,** each with its own verdict line per test:
+
+1. **It repeats.** Run twice in a row, the test passes both times and takes the
+   same readings in the same order.
+2. **It leaves the DUT clean.** After each run's teardown, every `clean_state:`
+   item is back at its value from before that run's setup (within its
+   tolerance, given its settle time). A failure names the item, both values and
+   the test.
+3. **It starts from a meaningful state.** No `wait_until` in the test's body was
+   already satisfied by the value from before the test's most recent write: the
+   DUT wasn't already where the test waits for it to go, so the test can tell
+   whether the DUT responded. Only waits are judged, because a wait says the
+   test expects a reaction; a `read` after writing an unrelated signal says
+   nothing. `check=False` waits are left out.
+
+- `pytest --check-hygiene` and `benchtare check-hygiene` run the tests as
+  usual, then check each one that passed. Verdicts: clean, not clean (with each
+  rule it broke), and not checked (it didn't pass to begin with, or a lower
+  area failed). A test that isn't clean makes the exit code 1. Rule 2 is "not
+  checked" for a DUT whose interface description has no `clean_state:`.
+- Separate from the test check: `--check-hygiene` and `--check-tests` aren't
+  combined in one run, so each area's verdict stands on its own.
+- Results schema version 3: each test's result under each rule, and each
+  `clean_state:` item compared, with its values before and after.
 - A usual run's closing line covers hygiene as well as test logic: which test
   files were never hygiene-checked, or changed since.
-- Results schema version 3: the hygiene check's results per test.
-- Tests: a clean test passes; a test that doesn't repeat, one that leaves an
-  input written, and one whose DUT was already in the state it expects are
-  each caught, with what to fix.
-- To settle at the start of M7: whether DUT outputs are compared before setup
-  and after teardown too, given outputs such as counters or measured values
-  that change on their own; and how the hygiene check and the test check share
-  reruns, so a run of both doesn't repeat work.
-- Later, not in M7: running the tests in another order, to find a test that
-  depends on what ran before it.
+- Tests, against the reference as it is:
+  - a clean test passes all three rules;
+  - a test that leaves `Mode` in `run`, one that leaves `supply_enable` on, one
+    that doesn't repeat, and one whose wait was already satisfied before its
+    write, are each caught, with the item, values and line;
+  - a state probe that a test changes is caught; one it leaves alone isn't;
+  - tolerance and settle are proven with values that differ, and values that
+    arrive late, since the reference itself is exact and immediate;
+  - each rule broken on purpose, to prove the tests catch it.
 
-### M8: Scaffold and acceptance
+### M8: DUT model plugins
+
+The reference DUT is a model: `reference/device.py` describes how it reacts to
+stimuli, and the harness names it with `simulate:`. M8 lets a team do the same
+for its own DUT, so the test check and the hygiene check can run without
+hardware.
+
+- A DUT model plugin interface, generalised from the reference device, and a
+  way to name a team's model in the harness file.
+- The test check and the hygiene check run against a model as against the
+  reference. A corrupted reading that leads a test to send an unusual stimulus
+  then reaches a model, not real equipment.
+- Tests: a team-written model in a temporary project runs the tests, the
+  self-test, the test check and the hygiene check.
+- Later, not in M8: active disruption for hygiene (putting the model into
+  another state before a test's setup, to see whether staging recovers it),
+  opt-in and on models only.
+
+### M9: Scaffold and acceptance
 
 - `benchtare init <dir>` writes the packaged quickstart: an interface
   description, a bench file, a harness file, a `conftest.py` with a staging
@@ -393,9 +454,9 @@ and harness (M4) and from test logic (M6).
   minutes, for someone who knows pytest and has never seen the tool. The
   hygiene check then passes, and the test check shows that the test can fail.
 
-### M9 (optional): Requirements and trace report
+### M10 (optional): Requirements and trace report
 
-Only after M8 passes.
+Only after M9 passes.
 
 - First decide how to read Doorstop trees. Either read its YAML item files
   directly with PyYAML, or depend on `doorstop`, which is LGPLv3 and brings
@@ -425,9 +486,9 @@ Do not build these yet, even where the design brief describes them:
 - Trend analysis and dashboards.
 - A GUI (design brief, later stage 10).
 - IDE setup for test development, such as editor schemas for the YAML files or
-  run configurations (design brief, later stage 9). `benchtare init` (M8)
+  run configurations (design brief, later stage 9). `benchtare init` (M9)
   writes the quickstart project only.
-- A full user guide with worked examples (design brief, later stage 12). M8
+- A full user guide with worked examples (design brief, later stage 12). M9
   writes the README quickstart only; recommended practices found along the way
   go on the brief's list of guide topics.
 - Platform-specific hardware support and setup guides (design brief, later
@@ -436,6 +497,14 @@ Do not build these yet, even where the design brief describes them:
 - Closed-loop or real-time simulation.
 - Ranges on signals, and helpers that generate boundary values from them
   (design brief, later stages 7 and 13). The test check (M6) needs no ranges.
+- A more realistic reference for exercising test hygiene: measurement noise,
+  settling ramps, a fault that latches until a supply cycle, a free-running
+  counter, and state only a probe can read (design brief, later stage 4).
+- Transports beyond virtual CAN, including SSH (design brief, later stage 3).
+  M7's state probes are hooks the team writes, reached however it likes.
+- Replaying recorded readings in the test check, for signals that need it;
+  running tests in another order; active disruption for hygiene (design brief,
+  later stage 4).
 
 ## Before the first release
 

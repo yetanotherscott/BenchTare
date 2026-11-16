@@ -40,3 +40,21 @@ MIT. Improvements are welcome back as pull requests, and are not required.
 BenchTare depends on [python-can](https://github.com/hardbyte/python-can), which
 is licensed LGPL-3.0. It is installed as a separate, unmodified package and is
 not bundled with BenchTare, so BenchTare's own code remains MIT.
+
+## How this project uses AI
+
+BenchTare is not handwritten. An AI coding assistant writes most of the code,
+tests and documentation. A person sets the goals, makes the design decisions,
+and decides what is merged.
+
+It is partly an experiment, to find out what it takes to get AI-generated code
+you could trust. The same rules apply to all of it:
+
+- Every behaviour has tests, and the whole suite runs in CI on Linux, Windows
+  and macOS.
+- Each check BenchTare makes is itself tested by breaking it on purpose, to
+  prove that the failure it exists for would be caught.
+- Clean-room only: public standards, public documentation and open-source
+  libraries, with each dependency's licence checked against MIT.
+
+This covers the whole project; individual commits are not labelled.

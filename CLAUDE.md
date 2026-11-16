@@ -16,7 +16,7 @@ Read these before making design decisions:
 ## Current scope
 
 Work through the milestones in `docs/first-slice-plan.md` in order (M0 is done;
-M1 to M8, then optional M9). Finish and commit one milestone before starting
+M1 to M9, then optional M10). Finish and commit one milestone before starting
 the next.
 
 The plan has an "Out of scope for this slice" list. Do not build anything on
@@ -68,7 +68,8 @@ Use these names consistently in code, docs and messages.
 | Test record | What happened at the bench during a test, kept with its result: readings, comparisons and outcomes, then stimuli, then frames |
 | Manifest | The record of what a run tested: versions and file hashes |
 | DUT identity | The DUT's hardware revision and software versions, recorded per run. The interface description lists the expected items by name, never their values |
-| Trace report | The report linking requirements, tests and results (M9) |
+| Trace report | The report linking requirements, tests and results (M10) |
+| Clean state | The signals and state probes an interface description lists as showing the DUT is clean, by name; the hygiene check compares only these |
 | Verification areas | Bench, harness, test hygiene, test logic and the DUT: what BenchTare verifies, each on its own, in that order |
 
 ## Conventions

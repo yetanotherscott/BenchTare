@@ -547,15 +547,30 @@ wrong).
 ### Test hygiene: the hygiene check (planned, M7)
 
 A test stands on its own when its staging puts the DUT into a known state and
-its teardown leaves nothing behind. The hygiene check will verify that, for any
-DUT, from the writes and readings BenchTare sees:
+its teardown leaves it clean. What "clean" means is the team's to say: the
+interface description lists, by name, the signals that show it, and any state
+probes for state no signal shows (a file on an embedded Linux target, a
+parameter in NVM, a stored fault code):
 
-- **It repeats:** the test passes when run twice in a row.
-- **It leaves nothing behind:** every input it wrote is restored by teardown,
-  and the DUT's outputs after teardown match those before setup.
-- **Its staging sets a meaningful starting point:** the DUT isn't already in
-  the state the test expects before the test's stimulus, so the test can tell
-  whether the DUT responded.
+```yaml
+clean_state:
+  Mode:
+  supply_enable:
+  Measured: {tolerance: 0.1, settle: 2.0}
+```
+
+Only these are compared, so nothing is tested beyond what matters. A
+`tolerance:` says how far apart two readings may be and still be the same; a
+`settle:` gives an item time to come back after teardown. The hygiene check
+will verify three rules for each test that passed, each with its own verdict:
+
+- **It repeats:** run twice in a row, it passes both times and takes the same
+  readings.
+- **It leaves the DUT clean:** after teardown, every `clean_state:` item is
+  back at its value from before setup.
+- **It starts from a meaningful state:** no `wait_until` in its body was already
+  satisfied before the test's most recent write, so the test can tell whether
+  the DUT responded.
 
 Until then, the test check notices a test that doesn't repeat, and reports its
 logic as not checked, because of test hygiene.
