@@ -86,6 +86,15 @@ def test_a_new_database_is_created_at_the_current_version(path):
     db.close()
 
 
+def test_commits_dont_wait_for_the_disk_so_runs_sharing_the_file_dont_starve(path):
+    # WAL with synchronous NORMAL: durable when a run crashes, and fast enough that writers
+    # don't hold the lock through a disk flush each.
+    db = open_database(path)
+    assert db.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    assert db.execute("PRAGMA synchronous").fetchone() == (1,)  # NORMAL
+    db.close()
+
+
 def test_reopening_keeps_what_was_stored(path):
     store = SQLiteStore(path)
     store.start_run(run_info())

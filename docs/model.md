@@ -720,7 +720,8 @@ Each run stores:
 | `--identify NAME=VALUE` | | Part of the DUT's identity, such as `hardware_revision=C`; repeatable |
 
 A run is written as it goes, so a run that crashed still has every test that
-finished, and is marked `running`. A later run only adds rows: it never changes
+finished, and is marked `running` (a power cut can lose the last moments, but
+never damages the file). A later run only adds rows: it never changes
 or removes an earlier run's. Two runs can share one file at the same time. A
 database written by a newer BenchTare is refused, and nothing is written to it.
 An older one is backed up and upgraded. A file that isn't a BenchTare database

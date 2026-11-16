@@ -267,6 +267,11 @@ def open_database(path: Path) -> sqlite3.Connection:
         _patiently(lambda: _bring_up_to_date(db, path), deadline)
         # Only once the file is known to be ours: switching to WAL rewrites the file's header.
         _patiently(lambda: db.execute("PRAGMA journal_mode = WAL"), deadline)
+        # In WAL mode, NORMAL doesn't wait for the disk at each commit, only at checkpoints, so
+        # a write holds the lock for microseconds rather than a disk flush, and runs sharing the
+        # file don't starve each other. A run that crashes still loses nothing; only a power
+        # cut or OS crash can lose the last commits, and the file is never damaged.
+        db.execute("PRAGMA synchronous = NORMAL")
     except sqlite3.OperationalError as exc:
         db.close()
         if _is_busy(exc):

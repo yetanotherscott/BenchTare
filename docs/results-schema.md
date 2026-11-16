@@ -390,7 +390,11 @@ Migration 2 to 3 adds:
   SQLite's WAL mode rewrites its header, so that happens only once the file is
   known to be a BenchTare database.)
 - **Two runs at once** on one file wait for each other (SQLite's WAL mode and a
-  five-second busy timeout). That includes two runs that find the file new or
+  five-second busy timeout). Commits use `synchronous = NORMAL`, which in WAL
+  mode doesn't wait for the disk at each commit, so a write holds the lock only
+  briefly and runs sharing a file don't starve each other. A run that crashes
+  still loses nothing; a power cut or OS crash can lose the last commits, but
+  never damages the file. That includes two runs that find the file new or
   older at the same moment: deciding whether to create or upgrade it happens
   while holding the write lock, so one run does it while the other waits, then
   finds it done. Running tests in parallel within one run is out of scope.
