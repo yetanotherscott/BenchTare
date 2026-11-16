@@ -231,7 +231,7 @@ CORPUS = [
     (
         "harness",
         "harness: h\nconnections: {}\nsimulate: [reference]\n",
-        "must name a simulated DUT, not a list",
+        "must name a DUT model, not a list",
     ),
     ("harness", "harness: [h]\nconnections: {}\n", "'harness:' must name the harness"),
     ("dut", "dut: [x]\nsignals: {a: {type: bool, direction: input}}\n", "'dut:' must name"),

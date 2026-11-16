@@ -338,7 +338,7 @@ class Bench:
         self._note_starting_point(binding, reading, matches)
         started = time.monotonic()
         item = self._buffer.wait_for_match(
-            binding.key, lambda value: matches(self._as_read(binding, value, reading)[1]), timeout
+            binding.key, lambda value: matches(self._seen(binding, value, reading)), timeout
         )
         waited = time.monotonic() - started
         if item is None:
@@ -468,11 +468,20 @@ class Bench:
             return before.value != value, before.value
         return False, value
 
+    def _seen(self, binding: Binding, value: Any, reading: Reading) -> Any:
+        """What a wait gives its test for one value that arrived. A wait sees many values: if
+        the test check changes any of them, the reading was corrupted, even if the last one it
+        saw happens to be unchanged."""
+        applied, seen = self._as_read(binding, value, reading)
+        if applied:
+            reading.corrupted = True
+        return seen
+
     def _settle(self, binding: Binding, reading: Reading, received: Any, applied: bool) -> None:
         """Note whether the test check changed this reading, and if it was meant to but
         couldn't, why."""
-        reading.corrupted = applied
-        if applied or self.corruption is None or not reading.checked:
+        reading.corrupted = reading.corrupted or applied
+        if reading.corrupted or self.corruption is None or not reading.checked:
             return
         if self.corrupt_at is not None and reading.index != self.corrupt_at:
             return

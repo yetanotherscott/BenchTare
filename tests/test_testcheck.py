@@ -189,6 +189,27 @@ def test_shift_corrupts_what_read_and_wait_until_give_the_test(bench):
     assert reached.data["corruption"] == SHIFT
 
 
+def test_a_wait_counts_as_corrupted_if_any_value_it_saw_was():
+    # Stale gives Mode 'standby' from before the second write. The DUT goes to run and back to
+    # standby, so the last value to arrive equals the stale one, but the run in between was
+    # changed. A slow mode change keeps the DUT in standby between the two writes.
+    with open_bench(
+        reference.path(reference.DUT),
+        reference.path(reference.BENCH),
+        reference.path(reference.HARNESS_CAN),
+        device_options={"mode_delay": 0.3},
+    ) as bench:
+        bench.wait_until(bench.signals.Mode, "standby", timeout=2.0)
+        bench.readings = []
+        bench.corruption = STALE
+        bench.write(bench.signals.ModeRequest, "run")
+        bench.write(bench.signals.ModeRequest, "standby")
+        with pytest.raises(ComparisonFailed):
+            bench.wait_until(bench.signals.Mode, "run", timeout=1.0)
+        (reading,) = bench.readings
+        assert reading.corrupted
+
+
 def test_only_the_targeted_reading_is_corrupted(bench):
     bench, _ = bench
     bench.corruption, bench.corrupt_at = SHIFT, 2

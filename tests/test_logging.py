@@ -300,7 +300,7 @@ def test_a_failing_reference_dut_action_is_logged(logs, monkeypatch, eventually)
         bench.write(bench.signals.Setpoint, 1.0)
         eventually(lambda: device.errors)
     (error,) = [r for r in logs.records() if r.levelno == logging.ERROR]
-    assert error.getMessage() == "reference DUT: an action failed: RuntimeError: boom"
+    assert error.getMessage() == "DUT model ReferenceDevice: an action failed: RuntimeError: boom"
     assert error.exc_info is not None
 
 

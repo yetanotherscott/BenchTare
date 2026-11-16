@@ -375,20 +375,36 @@ right; a more realistic reference to exercise them against comes later.
   the first run or the repeat; a state probe; tolerance and settle with values
   that differ or arrive late; and each rule broken on purpose.
 
-### M8: DUT model plugins
+### M8: DUT model plugins (done)
 
-The reference DUT is a model: `reference/device.py` describes how it reacts to
-stimuli, and the harness names it with `simulate:`. M8 lets a team do the same
-for its own DUT, so the test check and the hygiene check can run without
-hardware.
+The reference DUT was a model already: `reference/device.py` described how it
+reacts to stimuli, and the harness named it with `simulate:`. M8 lets a team do
+the same for its own DUT, so the tests, the self-test, the test check and the
+hygiene check all run without hardware.
 
-- A DUT model plugin interface, generalised from the reference device, and a
-  way to name a team's model in the harness file.
-- The test check and the hygiene check run against a model as against the
-  reference. A corrupted reading that leads a test to send an unusual stimulus
-  then reaches a model, not real equipment.
-- Tests: a team-written model in a temporary project runs the tests, the
-  self-test, the test check and the hygiene check.
+- `benchtare.DutModel` (`benchtare/sim/model.py`), generalised from the
+  reference device: a team overrides `started()` and `on_input(name, value)`,
+  and calls `publish`, `after` and `every`. All of a model's code runs on one
+  thread, so it needs no locks. An error in a model is recorded, the model keeps
+  running, and the self-test's bench check reports it. The reference DUT is now
+  a `DutModel` too, so the whole suite exercises the base class.
+- The harness file's `simulate:` names a model that ships with BenchTare
+  (`reference`), or a team's own as `models/my_dut.py:MyDut`, a Python file
+  relative to the harness file, imported without needing a place on the path;
+  a mapping form gives the model options. Mistakes are reported with the file
+  and line: no such file, a class that isn't there or isn't a `DutModel`, an
+  import error, signals the interface description doesn't have, options the
+  model doesn't take.
+- A model that publishes something that isn't one of the DUT's outputs is
+  reported by the bench check, instead of the value silently going nowhere.
+- Tests: the base class (order, one thread, `after`, `every`, errors, options);
+  naming models and every mistake in it; and a team-style thermostat project,
+  with its own interface description, bench file, harness and model, through
+  the tests, the self-test, the test check and the hygiene check.
+- Found along the way: a `wait_until` whose readings the test check had
+  corrupted counted as "nothing corrupted" when its last value happened to be
+  unchanged, which made a good test look like a hygiene problem. It now counts
+  any value the wait saw.
 - Later, not in M8: active disruption for hygiene (putting the model into
   another state before a test's setup, to see whether staging recovers it),
   opt-in and on models only.

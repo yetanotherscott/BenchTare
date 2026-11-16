@@ -65,6 +65,7 @@ Use these names consistently in code, docs and messages.
 | Hygiene check | The on-demand run that proves each test stands on its own: it repeats, leaves nothing behind, and starts from a meaningful state (M7) |
 | Test check | The on-demand run that corrupts readings, one at a time, to prove each test can fail at every check |
 | Reference | The simulated DUT, bench and harness that ship with the package |
+| DUT model | A simulation of a DUT, written by subclassing `benchtare.DutModel` and named in the harness file's `simulate:`; the reference DUT is one |
 | Test record | What happened at the bench during a test, kept with its result: readings, comparisons and outcomes, then stimuli, then frames |
 | Manifest | The record of what a run tested: versions and file hashes |
 | DUT identity | The DUT's hardware revision and software versions, recorded per run. The interface description lists the expected items by name, never their values |

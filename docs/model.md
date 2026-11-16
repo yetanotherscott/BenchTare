@@ -196,7 +196,7 @@ presence:                 # how to tell the DUT is connected and alive
   - {bus: can0, within: 1.0}        # any DUT traffic on the bus
   - {signal: Mode, within: 2.0}     # this signal is received
 
-simulate: reference       # only for simulated setups: which simulated DUT to plug in
+simulate: reference       # only for simulated setups: the DUT model to run
 ```
 
 Every signal used by a test needs a connection. A DUT `input` must be connected
@@ -214,7 +214,7 @@ simulated I/O channel and uses no CAN at all.
 
 With real hardware the harness is a physical thing and the file describes it.
 With a simulated bench, the simulation builds its wiring from the harness file
-and plugs in the simulated DUT named by `simulate:`.
+and runs the DUT model named by `simulate:` (see "DUT models" below).
 
 ## When a file is wrong
 
@@ -763,9 +763,10 @@ The reference DUT behaves simply and predictably:
   the setpoint in `run`, and 0.0 in `standby`.
 - `supply_ok` follows `supply_enable`.
 
-The device itself deals only in signal values. The simulation wires it to the
-bench by following the harness file, so the same device runs behind a virtual
-CAN bus or behind simulated I/O channels.
+The device is a DUT model like any team's (see "DUT models" below), and deals
+only in signal values. The simulation wires it to the bench by following the
+harness file, so the same device runs behind a virtual CAN bus or behind
+simulated I/O channels.
 
 Like a well-behaved real device, it ignores inputs it can't use. If one of its
 own actions fails anyway, it keeps running and records the error.
@@ -775,6 +776,76 @@ timeouts, so a bug in the simulation is never mistaken for a slow DUT.
 For BenchTare's own tests only, the simulation can cut a simulated wire, unplug
 the DUT from a bus, or fail a simulated equipment item. That proves the
 self-test catches real problems.
+
+## DUT models
+
+A DUT model describes how a DUT reacts to its inputs, so the tests, the
+self-test, the test check and the hygiene check can all run without hardware.
+The reference DUT is one. A team writes its own by subclassing
+`benchtare.DutModel`, in a Python file in its project:
+
+```python
+# models/thermostat.py
+from benchtare import DutModel
+
+
+class Thermostat(DutModel):
+    signals = ("heater_enable", "target", "temperature", "heating")
+
+    def __init__(self, publish, *, step=1.0):
+        super().__init__(publish)
+        self.step = step
+
+    def started(self):  # the DUT is powered
+        self.temperature, self.enabled, self.target = 20.0, False, 20.0
+        self.every(0.01, self.tick)
+
+    def on_input(self, name, value):  # an input arrived
+        if name == "heater_enable":
+            self.enabled = bool(value)
+        elif name == "target":
+            self.target = float(value)
+
+    def tick(self):
+        goal = self.target if self.enabled else 20.0
+        if self.temperature != goal:
+            change = min(self.step, abs(goal - self.temperature))
+            self.temperature += change if goal > self.temperature else -change
+        self.publish("temperature", self.temperature)
+        self.publish("heating", self.enabled and self.temperature < self.target)
+```
+
+The harness file names it, with the path relative to the harness file, and
+options for its `__init__` if it takes any:
+
+```yaml
+simulate: models/thermostat.py:Thermostat
+# or
+simulate:
+  model: models/thermostat.py:Thermostat
+  options: {step: 5.0}
+```
+
+- **What a model writes:** `started()`, called once it starts, and
+  `on_input(name, value)`, called for each input the bench drives. It should
+  ignore what a real DUT would ignore, rather than raise.
+- **What a model calls:** `publish(name, value)` to send an output;
+  `after(delay, action, *args)` to do something later; and `every(period,
+  action, *args)` for something cyclic.
+- **One thread.** All of a model's code runs on one thread, in order, so a
+  model needs no locks.
+- **Its mistakes are reported, not hidden.** An exception in a model, or a
+  value published for something that isn't one of the DUT's outputs, is
+  recorded; the model keeps running, and the self-test's bench check fails
+  with what happened. A model's `signals` are checked against the interface
+  description when the harness file loads, and a model file that can't be
+  imported, or a class that isn't a `DutModel`, is reported with the file and
+  line.
+- **A model, not the DUT.** Running the checks against a model is safe: the
+  test check's corrupted readings and anything a test sends in response reach
+  the model, never real equipment. A model only knows what its author wrote
+  into it, though: the hygiene check against a model says nothing about state
+  the model doesn't keep, such as a real DUT's NVM or files.
 
 ## What BenchTare doesn't do
 

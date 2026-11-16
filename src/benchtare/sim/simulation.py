@@ -27,13 +27,12 @@ from benchtare.backends._can_codec import (
     open_virtual_bus,
     to_python,
 )
-from benchtare.backends.base import Backend
+from benchtare.backends.base import Backend, BenchError
 from benchtare.backends.sim import SimIO
 from benchtare.backends.sim_can import SimCan
 from benchtare.dut.description import CanSignalRef, InterfaceDescription
 from benchtare.harness.config import Endpoint, HarnessConfig
 from benchtare.signals.model import Direction, SignalType
-from benchtare.sim.registry import SIMULATED_DUTS
 
 log = logging.getLogger(__name__)
 
@@ -104,11 +103,20 @@ class Simulation:
         backends: Mapping[str, Backend],
         device_options: Mapping[str, Any] | None = None,
     ) -> None:
-        assert harness.simulate is not None
+        assert harness.model is not None
         self._description = description
         self._harness = harness
         self._backends = backends
-        self.device = SIMULATED_DUTS[harness.simulate](self._route, **(device_options or {}))
+        options = {**harness.model_options, **(device_options or {})}
+        try:
+            self.device = harness.model(self._route, **options)
+        except Exception as exc:  # noqa: BLE001 - the team's model: say which, and what to check
+            raise BenchError(
+                f"the DUT model {harness.simulate} couldn't be created: {type(exc).__name__}: "
+                f"{exc}",
+                hint=f"its options under 'simulate:' in harness file {harness.path.name}, and its "
+                "__init__",
+            ) from None
         self._ports: dict[str, DutCanPort] = {}
         self._outputs: dict[str, tuple[Backend | DutCanPort, Endpoint]] = {}
 
@@ -200,7 +208,14 @@ class Simulation:
         """Called by the device for each output it produces."""
         target = self._outputs.get(name)
         if target is None:
-            return  # not connected in this harness
+            signal = self._description.signals.get(name)
+            if signal is None or signal.direction is not Direction.OUTPUT:
+                # Recorded in the model's errors, so the self-test reports it.
+                raise ValueError(
+                    f"it published {name!r}, which isn't one of the DUT's outputs in "
+                    f"{self._description.path.name}"
+                )
+            return  # an output this harness doesn't connect
         sink, endpoint = target
         if isinstance(sink, DutCanPort):
             sink.send(name, value)

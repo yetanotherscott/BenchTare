@@ -17,12 +17,14 @@ from benchtare.errors import (
     EquipmentWarning,
     FrameMismatchWarning,
 )
+from benchtare.sim.model import DutModel
 
 __version__ = "0.0.1"
 
 __all__ = [
     "BenchTareWarning",
     "DutIdentityWarning",
+    "DutModel",
     "EquipmentWarning",
     "FrameMismatchWarning",
     "__version__",

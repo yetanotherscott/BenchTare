@@ -73,8 +73,7 @@ def test_failing_device_action_is_reported_and_the_device_keeps_running():
         def broken():
             raise RuntimeError("simulated firmware bug")
 
-        with device._wake:
-            device._schedule(0, broken)
+        device.after(0, broken)
         time.sleep(0.1)
         assert device.running
         assert bench.check()[SIMULATION] == [

@@ -153,7 +153,7 @@ def test_presence_needs_a_positive_time(harness):
 
 
 def test_unknown_simulated_dut(harness):
-    with pytest.raises(ConfigError, match="(?s)unknown simulated DUT 'refrence'.*reference"):
+    with pytest.raises(ConfigError, match="(?s)unknown DUT model 'refrence'.*reference"):
         harness("connections: {}\nsimulate: refrence\n")
 
 

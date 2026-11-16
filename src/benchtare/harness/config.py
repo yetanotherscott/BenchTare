@@ -9,7 +9,15 @@
     presence:                 # how to tell the DUT is connected and alive
       - {bus: can0, within: 1.0}
       - {signal: Mode, within: 2.0}
-    simulate: reference       # only for simulated setups
+    simulate: reference       # only for simulated setups: the DUT model to run
+
+``simulate:`` names a DUT model (``benchtare.sim.model.DutModel``): one that ships with
+BenchTare, such as ``reference``; or a team's own, as ``models/my_dut.py:MyDut``, a Python
+file relative to the harness file and the class in it; or, with options for the model::
+
+    simulate:
+      model: models/my_dut.py:MyDut
+      options: {boot_delay: 0.5}
 
 The harness is checked against the interface description and the bench file when it loads.
 """
@@ -17,10 +25,14 @@ The harness is checked against the interface description and the bench file when
 from __future__ import annotations
 
 import difflib
+import hashlib
+import importlib.util
 import logging
 import os
+import sys
+import traceback
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -31,6 +43,7 @@ from benchtare.bench.config import BenchConfig, EquipmentConfig
 from benchtare.dut.description import InterfaceDescription
 from benchtare.errors import ConfigError, Problem
 from benchtare.signals.model import Direction, Signal
+from benchtare.sim.model import DutModel
 from benchtare.sim.registry import SIMULATED_DUTS
 
 log = logging.getLogger(__name__)
@@ -75,7 +88,9 @@ class HarnessConfig:
     connections: Mapping[str, Endpoint]
     loopbacks: tuple[Loopback, ...] = ()
     presence: tuple[Presence, ...] = ()
-    simulate: str | None = None
+    simulate: str | None = None  # the DUT model, as the harness file names it
+    model: type[DutModel] | None = None
+    model_options: Mapping[str, Any] = field(default_factory=dict)
 
 
 def load_harness_file(
@@ -85,7 +100,7 @@ def load_harness_file(
     path = Path(path)
     data = read_mapping(path, kind=KIND)
     problems: list[Problem] = []
-    checker = _Checker(description, bench, problems)
+    checker = _Checker(description, bench, problems, path)
 
     for key in data:
         if key not in _TOP_KEYS:
@@ -109,7 +124,7 @@ def load_harness_file(
     connections = checker.connections(data.get("connections"))
     loopbacks = checker.loopbacks(data.get("loopbacks"))
     presence = checker.presence(data.get("presence"), connections)
-    simulate = checker.simulate(data.get("simulate"))
+    simulate, model, model_options = checker.simulate(data.get("simulate"))
 
     if problems:
         raise ConfigError(path, problems, kind=KIND)
@@ -129,16 +144,23 @@ def load_harness_file(
         loopbacks=tuple(loopbacks),
         presence=tuple(presence),
         simulate=simulate,
+        model=model,
+        model_options=MappingProxyType(model_options),
     )
 
 
 class _Checker:
     def __init__(
-        self, description: InterfaceDescription, bench: BenchConfig, problems: list[Problem]
+        self,
+        description: InterfaceDescription,
+        bench: BenchConfig,
+        problems: list[Problem],
+        path: Path,
     ) -> None:
         self.description = description
         self.bench = bench
         self.problems = problems
+        self.path = path
         self.used_channels: dict[str, str] = {}  # "eq.ch" -> what uses it
 
     # --- endpoints --------------------------------------------------------------------------
@@ -462,28 +484,42 @@ class _Checker:
                 result.append(Presence(within=float(within), signal=name))
         return result
 
-    def simulate(self, raw: Any) -> str | None:
+    def simulate(self, raw: Any) -> tuple[str | None, type[DutModel] | None, dict[str, Any]]:
+        """The DUT model to run, as the harness names it, and its options."""
         if raw is None:
-            return None
-        known = ", ".join(sorted(SIMULATED_DUTS))
-        if not isinstance(raw, str):
+            return None, None, {}
+        options: Any = {}
+        if isinstance(raw, dict):
+            for key in raw:
+                if key not in ("model", "options"):
+                    self.problems.append(
+                        Problem(f"unknown key '{key}'", where="simulate", hint=_MODEL_EXAMPLE)
+                    )
+            options = raw.get("options", {})
+            if not isinstance(options, dict) or not all(isinstance(k, str) for k in options):
+                self.problems.append(
+                    Problem(
+                        f"'options:' must map option names to values, not {kind_of(options)}",
+                        where="simulate",
+                        hint=_MODEL_EXAMPLE,
+                    )
+                )
+                options = {}
+            raw = raw.get("model")
+        if not isinstance(raw, str) or not raw.strip():
             self.problems.append(
                 Problem(
-                    f"must name a simulated DUT, not {kind_of(raw)}",
+                    f"must name a DUT model, not {kind_of(raw)}",
                     where="simulate",
-                    hint=f"simulated DUTs: {known}",
+                    hint=f"one that ships with BenchTare ({', '.join(sorted(SIMULATED_DUTS))}), "
+                    f"or a team's own; {_MODEL_EXAMPLE}",
                 )
             )
-            return None
-        if raw not in SIMULATED_DUTS:
-            self.problems.append(
-                Problem(
-                    f"unknown simulated DUT '{raw}'",
-                    where="simulate",
-                    hint=f"simulated DUTs: {known}",
-                )
-            )
-            return None
+            return None, None, {}
+        name = raw.strip()
+        model = self._model(name)
+        if model is None:
+            return None, None, {}
         real = [e.id for e in self.bench.equipment.values() if not e.simulated]
         if real:
             self.problems.append(
@@ -493,17 +529,116 @@ class _Checker:
                     hint="remove 'simulate:' to test a real DUT",
                 )
             )
-        missing = [n for n in SIMULATED_DUTS[raw].SIGNALS if n not in self.description.signals]
+        missing = [n for n in model.signals if n not in self.description.signals]
         if missing:
             self.problems.append(
                 Problem(
-                    f"the simulated DUT '{raw}' uses signals that "
+                    f"the DUT model '{name}' uses signals that "
                     f"{self.description.path.name} doesn't have: {', '.join(missing)}",
                     where="simulate",
-                    hint=f"use the {raw} interface description with this harness",
+                    hint="use the interface description the model was written for, or change "
+                    "the model's signals",
                 )
             )
-        return raw
+        return name, model, dict(options)
+
+    def _model(self, name: str) -> type[DutModel] | None:
+        """A model that ships with BenchTare, by name, or a team's, as ``file.py:Class``."""
+        file, colon, class_name = name.rpartition(":")
+        if not colon:
+            if name in SIMULATED_DUTS:
+                return SIMULATED_DUTS[name]
+            self.problems.append(
+                Problem(
+                    f"unknown DUT model '{name}'",
+                    where="simulate",
+                    hint=f"models that ship with BenchTare: {', '.join(sorted(SIMULATED_DUTS))}; "
+                    f"or a team's own, {_MODEL_EXAMPLE}",
+                )
+            )
+            return None
+        where = "simulate"
+        source = (self.path.parent / file).resolve()
+        if not file.endswith(".py") or not class_name.isidentifier():
+            self.problems.append(
+                Problem(
+                    f"'{name}' must be a Python file and a class in it, such as "
+                    "models/my_dut.py:MyDut",
+                    where=where,
+                )
+            )
+            return None
+        if not source.is_file():
+            self.problems.append(
+                Problem(
+                    f"there is no file {file} for the DUT model",
+                    where=where,
+                    hint=f"the path is relative to the harness file's folder, {self.path.parent}",
+                )
+            )
+            return None
+        try:
+            module = _import_file(source)
+        except Exception as exc:  # noqa: BLE001 - the team's code: report it, with where
+            self.problems.append(
+                Problem(
+                    f"the DUT model file {file} couldn't be loaded: {type(exc).__name__}: {exc}"
+                    f"{_where_in(exc, source)}",
+                    where=where,
+                )
+            )
+            return None
+        found = getattr(module, class_name, None)
+        if not (isinstance(found, type) and issubclass(found, DutModel)):
+            models = sorted(
+                n
+                for n, v in vars(module).items()
+                if isinstance(v, type) and issubclass(v, DutModel) and v is not DutModel
+            )
+            what = "isn't a DutModel" if found is not None else "isn't in it"
+            self.problems.append(
+                Problem(
+                    f"{class_name} {what}: a DUT model is a class that subclasses "
+                    "benchtare.DutModel",
+                    where=where,
+                    hint=f"DUT models in {file}: {', '.join(models)}"
+                    if models
+                    else f"define  class {class_name}(DutModel)  in {file}",
+                )
+            )
+            return None
+        return found
+
+
+_MODEL_EXAMPLE = "for example  simulate: models/my_dut.py:MyDut"
+
+
+def _import_file(source: Path) -> Any:
+    """Import a team's Python file as a module of its own, without it being on sys.path."""
+    digest = hashlib.sha256(str(source).encode()).hexdigest()[:12]
+    name = f"benchtare_dut_model_{source.stem}_{digest}"
+    spec = importlib.util.spec_from_file_location(name, source)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    return module
+
+
+def _where_in(exc: BaseException, source: Path) -> str:
+    """', at line 12' when the error happened in ``source``."""
+    if isinstance(exc, SyntaxError) and exc.lineno:
+        return f", at line {exc.lineno}"
+    lines = [
+        frame.lineno
+        for frame in traceback.extract_tb(exc.__traceback__)
+        if Path(frame.filename) == source
+    ]
+    return f", at line {lines[-1]}" if lines else ""
 
 
 def _carries_fd(equipment: EquipmentConfig) -> bool:
