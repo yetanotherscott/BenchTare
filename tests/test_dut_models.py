@@ -154,7 +154,7 @@ class Thermostat(DutModel):
 
     signals = ("heater_enable", "target", "temperature", "heating")
 
-    def __init__(self, publish, *, step=1.0, period=0.01):
+    def __init__(self, publish, *, step=1.0, period=0.05):
         super().__init__(publish)
         self.step = step
         self.period = period
@@ -197,15 +197,18 @@ def cold(bench, signals):
     bench.wait_until(signals.heating, False, timeout=1.0)
 """
 
+# heating is true only while the temperature climbs: 9 ticks of 50 ms, from 20 to 30 degC. The
+# sim equipment samples its read channels like a DAQ, so a shorter pulse can fall between samples
+# on a slow machine (a 40 ms pulse did, on a macOS CI runner) and the test fails for no reason.
 TESTS = """
 import pytest
 
 
 def test_heats_to_its_target(cold, bench, signals):
-    bench.write(signals.target, 25.0)
+    bench.write(signals.target, 30.0)
     bench.write(signals.heater_enable, True)
     bench.wait_until(signals.heating, True, timeout=1.0)
-    bench.wait_until(signals.temperature, pytest.approx(25.0), timeout=2.0)
+    bench.wait_until(signals.temperature, pytest.approx(30.0), timeout=2.0)
 """
 
 CLI = ["--dut=thermostat.dut.yaml", "--bench=bench.yaml", "--harness=harness.yaml"]
