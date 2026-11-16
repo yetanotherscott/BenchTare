@@ -163,18 +163,19 @@ See [first-slice-plan.md](first-slice-plan.md) for the build order.
 
 ## Later stages
 
-Each stage widens one area and leaves the others unchanged. The order is a
-proposal.
+Each stage widens one area and leaves the others unchanged. Stage 2 is under
+way, on the `plugins` branch, following [plugin-plan.md](plugin-plan.md); the
+order of the rest is a proposal.
 
 | Stage | Area | Adds |
 | --- | --- | --- |
-| 2 | Backends | First hardware: SocketCAN plus two dissimilar low-cost DAQ devices, to prove the capability interface. The test check on real equipment needs an explicit opt-in, since a corrupted reading can lead a test to send a stimulus it normally wouldn't. The hygiene check is run on a real DUT, as acceptance |
-| 3 | Transports | Transport plugin interface, with serial, TCP/UDP sockets, MQTT and SSH as the first plugins. SSH lets an interface description or harness reach an embedded Linux target, for signals and for test hygiene's state probes |
-| 4 | Self-verification | Standard interface fault stimuli, such as dropped or stopped CAN messages; the shipped reference extended to cover each new backend and transport. For test hygiene: a more realistic reference (measurement noise, settling ramps, a fault that latches until a supply cycle, a free-running counter, state only a probe can read), running tests in other orders, and active disruption on DUT models. For the test check: replaying recorded readings, for signals that need it |
+| 2 | Plugins | A versioned plugin API, with plugins identified by UUID and found by discovery; every claim a plugin makes labelled verified, attested or asserted; a conformance kit, and grading from bronze to platinum on verifiability; CAN with DBC as the first transport. Then example plugins built only on the public API, as an outside team would: SocketCAN on a virtual bus, a QEMU machine backend for an embedded Linux example DUT built with Yocto, serial, and SSH, whose state probes give test hygiene real operating-system state; and a plugin template and guide |
+| 3 | Hardware and more transports | First hardware: SocketCAN on a real adapter, plus two dissimilar low-cost DAQ devices, to prove the capability interface. The test check on real equipment needs an explicit opt-in, since a corrupted reading can lead a test to send a stimulus it normally wouldn't. The hygiene check is run on a real DUT, as acceptance. TCP/UDP sockets and MQTT as plugins, on stage 2's interfaces |
+| 4 | Self-verification | Standard interface fault stimuli, such as dropped or stopped CAN messages; the shipped reference extended to cover each new backend and transport. For test hygiene: a more realistic simulated reference (measurement noise, settling ramps, a fault that latches until a supply cycle, a free-running counter, state only a probe can read), beyond stage 2's example DUT, running tests in other orders, and active disruption on DUT models. For the test check: replaying recorded readings, for signals that need it |
 | 5 | Requirements | ReqIF, StrictDoc and Sphinx-Needs importers, feeding the trace report M10 builds from Doorstop |
 | 6 | Analysis | Remote database option; trends for pass rate, duration and measured values |
 | 7 | Protocols | CANopen and Modbus, each with a CI reference; J1939 and ISOBUS considered after that. Each standard brings the valid ranges and special values (such as "error" and "not available") it defines for its signals: tests can read them instead of retyping the standard, and an interface description can override them per signal |
-| 8 | Community | Backend and adapter guides; write-back adapters from contributors |
+| 8 | Community | Guides for backends and adapters, beyond stage 2's plugin guide; write-back adapters from contributors |
 | 9 | Test development in IDEs | Setup for writing and debugging tests in common IDEs, such as VS Code and PyCharm: schemas so the editor completes and checks interface descriptions, bench files and harness files; completion of signal names in tests; run and debug configurations; `benchtare init` writing them for a new project |
 | 10 | GUI | A graphical front end for people who don't live in a terminal, for example to run the self-test and tests, follow a run, and browse results and test records. It drives pytest and reads the results database; it doesn't replace either. Scope to be decided |
 | 11 | Platforms | Linux, Windows and macOS supported on real hardware as well as in simulation: hardware backends that work on each (SocketCAN, from stage 2, is Linux-only, so Windows and macOS need vendor CAN adapters through python-can's interfaces, such as PCAN or Kvaser); install and setup guides for each |
@@ -266,9 +267,12 @@ not from hands-on evaluation.
 
 - [x] Confirm the name is free on PyPI and GitHub, and reserve it: BenchTare
       is published on PyPI.
-- [ ] Standalone project, or built on Jumpstarter's driver model?
+- [x] Standalone project, or built on Jumpstarter's driver model? Standalone,
+      with its own plugin API (plugin plan, step 0). Jumpstarter stays a
+      possible host for equipment, through a backend plugin.
 - [ ] Which two dissimilar low-cost DAQ devices prove the capability interface first?
-- [ ] Which transport plugin ships second, after virtual CAN?
+- [x] Which transport plugin ships second, after virtual CAN? The plugin plan
+      builds serial and SSH next, as example plugins (stage 2).
 - [ ] Is a hardware reference bench needed later?
 - [x] Which local database is the default? SQLite: the first slice is built on
       it.

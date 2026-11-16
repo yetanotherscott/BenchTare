@@ -1,9 +1,10 @@
 # BenchTare Plugin Plan
 
-**Status: draft, subject to change.** This plan is worked through one step at
-a time. Each step ends at a **check-in**, where the decisions it depends on are
-confirmed before any code is written. The first design matters: it can change
-later, but changes get painful once anyone has adopted it.
+**Status: draft, subject to change. Step 0, the plan as a whole, is
+confirmed (16 Nov 2026); step 1 is next.** This plan is worked through one step
+at a time. Each step ends at a **check-in**, where the decisions it depends on
+are confirmed before any code is written. The first design matters: it can
+change later, but changes get painful once anyone has adopted it.
 
 The terms used here are defined in [model.md](model.md). Where this plan adds
 a term, it says so.
@@ -47,6 +48,27 @@ a term, it says so.
    dependencies are flagged, as before.
 8. **This work happens on the `plugins` branch,** merged from `main`
    regularly, while the first slice is released on `main`.
+
+Confirmed at step 0:
+
+9. **The aims and what is not in this plan** stand as written.
+10. **Measure first.** Steps 1 to 5 build the means of measuring plugins before
+    steps 6 to 10 build the plugins. The plugin API stays provisional until
+    step 7's SocketCAN plugin, the first separate distribution, has used it.
+11. **Versioning.** Nothing is released from this branch. It first merges into
+    `main` after step 7, released as 0.1.0: the results schema and how
+    backends are found both change, so under Semantic Versioning before 1.0.0
+    it is a minor release. Steps 8 to 10 merge as each one finishes. Each step
+    adds its notable changes under `## [Unreleased]` in `CHANGELOG.md`.
+12. **The acceptance check by hand gates the first merge.**
+13. **BenchTare is standalone.** It defines its own plugin API, rather than
+    building on Jumpstarter's driver model. Jumpstarter stays a possible host
+    for equipment, reached later through a backend plugin.
+14. **Step 1 gives "transport" one meaning everywhere:** in `model.md`, in
+    `CLAUDE.md`'s vocabulary and decisions, and in the design brief's goals
+    and decisions, not in `model.md` alone.
+15. **The design brief's later stages follow this plan.** Its stage 2 is this
+    work.
 
 ## Working definitions (proposed)
 
@@ -186,9 +208,9 @@ Each step ends with tests passing, a commit on the branch, and a check-in.
 
 | Step | What it delivers | Check-in confirms |
 | --- | --- | --- |
-| 0 | This plan | The plan as a whole |
-| 1 | The definitions in `model.md`: backend and transport; verified, attested and asserted; how the core's current checks are labelled | The definitions |
-| 2 | Plugin API, identity and discovery: the versioned API module, UUIDs, entry points, the built-in backends found the same way, and each run recording its plugins (results schema version 4) | The API surface, where UUIDs live, the schema change |
+| 0 | This plan (confirmed) | The plan as a whole |
+| 1 | The definitions in `model.md`, `CLAUDE.md` and the design brief: backend and transport; verified, attested and asserted; how the core's current checks are labelled | The definitions |
+| 2 | Plugin API, identity and discovery: the versioned API module, UUIDs, entry points, the built-in backends found the same way, and each run recording its plugins (a results schema change, with a new version and a migration) | The API surface, where UUIDs live, the schema change |
 | 3 | Verified and asserted in the core: self-test results and records labelled, with the bench check's asserted health kept apart from its verified checks | The wording, the schema change |
 | 4 | The conformance kit for backends, run against `sim` and `sim_can` | The rule list |
 | 5 | Grading, first version: `benchtare grade`, with each tier's rules drawn from the kit and the plugin's metadata | The tiers and their rules |
@@ -201,18 +223,24 @@ Each step ends with tests passing, a commit on the branch, and a check-in.
 Steps 1 to 5 build the means of measuring plugins before the plugins being
 measured.
 
-## Before this merges into `main`
+## Before the first merge into `main`
 
-- The first slice is released: the 0.0.1 placeholder on PyPI, the acceptance
-  check, then a first real release.
-- `CLAUDE.md`'s scope, the first-slice plan's out-of-scope list and the design
-  brief's later stages are updated to match whatever this plan has become.
+After step 7, and then:
+
+- The acceptance check by hand is done. The first slice is already on PyPI, as
+  0.0.1 and 0.0.2.
+- `CLAUDE.md`'s scope and the first-slice plan's out-of-scope list are updated
+  to match whatever this plan has become, and the design brief's stage 2 says
+  what has merged.
+- The changelog's Unreleased lines become 0.1.0, which is released from
+  `main`.
 
 ## Not in this plan
 
-Real hardware backends and DAQ devices; CANopen, Modbus, J1939 and other
-protocols; a remote database; a GUI; requirements and the trace report (M10,
-stage 5); a public registry of plugins.
+Real hardware backends and DAQ devices (design brief, stage 3); TCP/UDP
+sockets and MQTT (stage 3); CANopen, Modbus, J1939 and other protocols; a
+remote database; a GUI; requirements and the trace report (M10, stage 5); a
+public registry of plugins; a backend built on Jumpstarter.
 
 ## Licensing
 

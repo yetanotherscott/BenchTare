@@ -19,7 +19,7 @@ start, and each is easy to change early.
 | SQLite is the default local database (confirmed: the first slice is built on it) | It is in the Python standard library, so there is nothing to install | Low, if the store sits behind an interface |
 | Python 3.10 or newer | Structural pattern matching and modern typing | Low |
 | Linux, Windows and macOS, tested in CI | The first slice is pure Python on simulated equipment, so it costs little to keep all three working from the start | Low now, higher once hardware backends exist |
-| Standalone project, not built on Jumpstarter | Keeps the first slice free of a large dependency | Medium |
+| Standalone project, not built on Jumpstarter (confirmed for the plugin API: plugin plan, step 0) | Keeps the first slice free of a large dependency | Medium |
 
 ## Dependencies
 
@@ -485,7 +485,7 @@ Do not build these yet, even where the design brief describes them:
 
 - Real hardware backends and DAQ devices.
 - Transports other than virtual CAN: serial, sockets, MQTT and SSH (design
-  brief, later stage 3). M7's state probes are hooks the team writes, reached
+  brief, later stages 2 and 3). M7's state probes are hooks the team writes, reached
   however it likes.
 - Protocols above raw CAN signals (CANopen, Modbus, UDS, J1939, ISOBUS),
   including any `standards:` value in an interface description.
