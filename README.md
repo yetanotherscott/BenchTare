@@ -2,7 +2,7 @@
 
 A self-verifying HIL/SIL test framework for embedded systems, built on pytest.
 
-**Status: in development, not released yet.** The first slice is built:
+**Status: pre-alpha.** The first slice is built:
 everything below runs on a laptop, against a simulated reference DUT or a
 team's own DUT model. Hardware backends come after it. It runs on Linux,
 Windows and macOS, with Python 3.10 or later and pytest 7.4 or later.
@@ -42,11 +42,11 @@ simulation, and proves that its own results can be trusted.
 
 ## Quickstart
 
-BenchTare isn't on PyPI yet, so install it from GitHub, preferably into a
-virtual environment. Then write the quickstart project and run it:
+Install BenchTare from PyPI, preferably into a virtual environment. Then write
+the quickstart project and run it:
 
 ```bash
-pip install git+https://github.com/yetanotherscott/BenchTare
+pip install benchtare
 benchtare init demo
 cd demo
 pytest
@@ -85,10 +85,14 @@ Three more commands use the same files and settings:
 
 ## Documents
 
-- [Model](docs/model.md): what BenchTare models, and what each file you write is for.
-- [Design brief](docs/design-brief.md): goals, non-goals, architecture, prior art.
-- [First-slice plan](docs/first-slice-plan.md): what is being built first, and in what order.
-- [Results schema](docs/results-schema.md): what each run stores in the results database.
+- [Model](https://github.com/yetanotherscott/BenchTare/blob/main/docs/model.md): what
+  BenchTare models, and what each file you write is for.
+- [Design brief](https://github.com/yetanotherscott/BenchTare/blob/main/docs/design-brief.md):
+  goals, non-goals, architecture, prior art.
+- [First-slice plan](https://github.com/yetanotherscott/BenchTare/blob/main/docs/first-slice-plan.md):
+  what is being built first, and in what order.
+- [Results schema](https://github.com/yetanotherscott/BenchTare/blob/main/docs/results-schema.md):
+  what each run stores in the results database.
 
 ## License
 

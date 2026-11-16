@@ -32,6 +32,11 @@ dependencies = [
     "pytest>=7.4",     # BenchTare is a pytest plugin (M3); CI tests this floor
 ]
 
+[project.urls]
+Homepage = "https://github.com/yetanotherscott/BenchTare"
+Source = "https://github.com/yetanotherscott/BenchTare"
+Issues = "https://github.com/yetanotherscott/BenchTare/issues"
+
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "ruff"]
 
@@ -43,6 +48,11 @@ benchtare = "benchtare.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/benchtare"]
+
+# Only what building and testing from source needs, so a local build never picks up stray files.
+# pyproject.toml, README.md and LICENSE are always included.
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/docs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
