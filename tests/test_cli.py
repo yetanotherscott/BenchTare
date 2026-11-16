@@ -159,6 +159,40 @@ def test_check_tests_help_explains_the_command(project):
     )
 
 
+def test_check_hygiene_exits_0_when_every_test_is_clean(project):
+    (project.path / "test_never_run.py").unlink()
+    project.makepyfile(test_good=GOOD_TEST)
+    result = benchtare(project, "check-hygiene", *CLI)
+    assert result.ret == 0
+    result.stdout.fnmatch_lines(["test_good.py::test_tracks: clean", "Hygiene check: 1 clean"])
+
+
+def test_check_hygiene_exits_1_when_a_test_isnt_clean(project):
+    (project.path / "test_never_run.py").unlink()
+    project.makepyfile(
+        test_already="""
+        def test_already_there(bench, signals):
+            bench.read(signals.Mode, timeout=2.0)
+            bench.write(signals.ModeRequest, "standby")
+            bench.wait_until(signals.Mode, "standby", timeout=1.0)
+        """
+    )
+    result = benchtare(project, "check-hygiene", *CLI)
+    assert result.ret == 1
+    result.stdout.fnmatch_lines(["test_already.py::test_already_there: NOT CLEAN"])
+
+
+def test_check_hygiene_help_explains_the_command(project):
+    result = benchtare(project, "check-hygiene", "--help")
+    assert result.ret == 0
+    result.stdout.fnmatch_lines(
+        [
+            "Run the hygiene check: prove each test stands on its own*",
+            "Exit codes: 0 every test passed and is clean, 1 a test failed or isn't clean*",
+        ]
+    )
+
+
 def test_a_command_is_required(project):
     result = benchtare(project)
     assert result.ret == 2

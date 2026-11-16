@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from benchtare.dut.identity import IdentityValue
+from benchtare.hygiene import MISSING, ItemResult, RuleResult
 from benchtare.record import RecordEntry
 from benchtare.results.manifest import ManifestFile
 from benchtare.results.schema import SCHEMA_VERSION, open_database, transaction, write_failed
@@ -33,6 +34,13 @@ FINISHED = "finished"
 STOPPED = "stopped"
 
 TEST_CHECK = "check-tests"  # the kind of a run of the test check
+HYGIENE_CHECK = "check-hygiene"  # the kind of a run of the hygiene check
+
+# For each on-demand check, the manifest columns saying when a test file was last checked.
+_CHECKED_COLUMNS = {
+    TEST_CHECK: ("last_checked_at", "unchanged_since_check"),
+    HYGIENE_CHECK: ("last_hygiene_at", "unchanged_since_hygiene"),
+}
 
 # Facts of a record entry that get columns of their own; the rest go in ``data``.
 _ENTRY_COLUMNS = ("signal", "endpoint", "unit", "value")
@@ -115,9 +123,24 @@ class ResultStore(Protocol):
         where ``rerun`` is ``"control"`` or ``"reading 2 shift"``)."""
         ...
 
-    def check_status(self, run_id: str) -> list[tuple[str, str | None, bool | None]]:
-        """Each test file in the run's manifest: its path, when it was last checked, and
-        whether it is unchanged since (None when never checked)."""
+    def check_status(
+        self, run_id: str, kind: str = TEST_CHECK
+    ) -> list[tuple[str, str | None, bool | None]]:
+        """Each test file in the run's manifest: its path, when the check of ``kind`` last ran
+        on it, and whether it is unchanged since (None when never checked)."""
+        ...
+
+    def add_hygiene(
+        self,
+        run_id: str,
+        test_seq: int,
+        verdict: str,
+        rules: Sequence[RuleResult],
+        items: Sequence[ItemResult],
+        records: Mapping[str, Mapping[str, Sequence[RecordEntry]]],
+    ) -> None:
+        """A test's verdict from the hygiene check, each rule's result, each clean-state item
+        compared, and the repeat run's record (``records["repeat"][phase]``)."""
         ...
 
     def finish_run(
@@ -193,34 +216,42 @@ class SQLiteStore:
             )
 
     def add_manifest_files(self, run_id: str, files: Sequence[ManifestFile]) -> None:
-        """Store the manifest. For each test file, also when the test check last ran on it
-        (the latest finished check run of the same DUT, before this run) and whether the file
-        is unchanged since."""
+        """Store the manifest. For each test file, also when each on-demand check (the test
+        check, the hygiene check) last ran on it, in a finished run of the same DUT before this
+        one, and whether the file is unchanged since."""
         rows = []
         for f in files:
-            checked_at, unchanged = None, None
-            if f.role == "test":
-                last = self.db.execute(
-                    """SELECT r.started_at, m.sha256 FROM manifest_files m
-                    JOIN runs r ON r.id = m.run_id
-                    WHERE r.kind = ? AND r.status = ? AND m.path = ? AND r.id != ?
-                        AND r.dut = (SELECT dut FROM runs WHERE id = ?)
-                    ORDER BY r.started_at DESC LIMIT 1""",
-                    (TEST_CHECK, FINISHED, f.path, run_id, run_id),
-                ).fetchone()
-                if last is not None:
-                    checked_at, unchanged = last[0], int(last[1] == f.sha256)
-            rows.append((run_id, f.path, f.role, f.sha256, f.size, checked_at, unchanged))
+            row: list[Any] = [run_id, f.path, f.role, f.sha256, f.size]
+            for kind in _CHECKED_COLUMNS:
+                checked_at, unchanged = None, None
+                if f.role == "test":
+                    last = self.db.execute(
+                        """SELECT r.started_at, m.sha256 FROM manifest_files m
+                        JOIN runs r ON r.id = m.run_id
+                        WHERE r.kind = ? AND r.status = ? AND m.path = ? AND r.id != ?
+                            AND r.dut = (SELECT dut FROM runs WHERE id = ?)
+                        ORDER BY r.started_at DESC LIMIT 1""",
+                        (kind, FINISHED, f.path, run_id, run_id),
+                    ).fetchone()
+                    if last is not None:
+                        checked_at, unchanged = last[0], int(last[1] == f.sha256)
+                row += [checked_at, unchanged]
+            rows.append(tuple(row))
         with self._write():
             self.db.executemany(
                 "INSERT OR IGNORE INTO manifest_files (run_id, path, role, sha256, size, "
-                "last_checked_at, unchanged_since_check) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "last_checked_at, unchanged_since_check, last_hygiene_at, "
+                "unchanged_since_hygiene) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
 
-    def check_status(self, run_id: str) -> list[tuple[str, str | None, bool | None]]:
+    def check_status(
+        self, run_id: str, kind: str = TEST_CHECK
+    ) -> list[tuple[str, str | None, bool | None]]:
+        at_column, same_column = _CHECKED_COLUMNS[kind]
         rows = self.db.execute(
-            "SELECT path, last_checked_at, unchanged_since_check FROM manifest_files "
+            # The column names come from _CHECKED_COLUMNS, never from outside.
+            f"SELECT path, {at_column}, {same_column} FROM manifest_files "
             "WHERE run_id = ? AND role = 'test' ORDER BY path",
             (run_id,),
         ).fetchall()
@@ -374,6 +405,62 @@ class SQLiteStore:
                         r.detail,
                     )
                     for r in results
+                ],
+            )
+            self.db.executemany(
+                """INSERT INTO record_entries (run_id, seq, test_seq, phase, at, kind, level,
+                    text, signal, endpoint, unit, value, value_num, data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+        self._next_entry[run_id] = first + len(rows)
+
+    def add_hygiene(
+        self,
+        run_id: str,
+        test_seq: int,
+        verdict: str,
+        rules: Sequence[RuleResult],
+        items: Sequence[ItemResult],
+        records: Mapping[str, Mapping[str, Sequence[RecordEntry]]],
+    ) -> None:
+        first = self._next_entry.get(run_id, 1)
+        entries = [
+            (rerun, phase, entry)
+            for rerun, phases in records.items()
+            for phase, phase_entries in phases.items()
+            for entry in phase_entries
+        ]
+        rows = [
+            _entry_row(run_id, first + i, test_seq, f"{rerun} {phase}", entry)
+            for i, (rerun, phase, entry) in enumerate(entries)
+        ]
+        with self._write():
+            self.db.execute(
+                "UPDATE test_results SET hygiene_verdict = ? WHERE run_id = ? AND seq = ?",
+                (verdict, run_id, test_seq),
+            )
+            self.db.executemany(
+                "INSERT INTO hygiene_checks (run_id, test_seq, rule, outcome, detail) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(run_id, test_seq, r.rule, r.outcome, r.detail) for r in rules],
+            )
+            self.db.executemany(
+                "INSERT INTO hygiene_items (run_id, test_seq, run, name, kind, before, after, "
+                "outcome, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        run_id,
+                        test_seq,
+                        i.run,
+                        i.name,
+                        i.kind,
+                        None if i.before is MISSING else _json(i.before),
+                        None if i.after is MISSING else _json(i.after),
+                        i.outcome,
+                        i.detail,
+                    )
+                    for i in items
                 ],
             )
             self.db.executemany(

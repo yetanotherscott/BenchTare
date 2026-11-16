@@ -53,15 +53,15 @@ import time
 import uuid
 import warnings
 from collections import Counter
-from collections.abc import Callable, Generator, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 from _pytest.runner import runtestprotocol  # what plugins that rerun a test use
 
-from benchtare import __version__, testcheck
+from benchtare import __version__, hookspecs, hygiene, testcheck
 from benchtare._yaml import count
 from benchtare.backends.base import ReadTimeout
 from benchtare.bench.config import BenchConfig, load_bench_file
@@ -105,6 +105,7 @@ from benchtare.results.manifest import (
 from benchtare.results.schema import ResultsError
 from benchtare.results.store import (
     FINISHED,
+    HYGIENE_CHECK,
     STOPPED,
     TEST_CHECK,
     RunInfo,
@@ -215,6 +216,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "any test (this is what 'benchtare selftest' does)",
     )
     group.addoption(
+        "--check-hygiene",
+        dest="benchtare_check_hygiene",
+        action="store_true",
+        default=False,
+        help="the hygiene check: run the tests, then check that each one that passed repeats, "
+        "leaves the DUT's clean_state as it found it, and starts from a meaningful state "
+        "(this is what 'benchtare check-hygiene' does)",
+    )
+    group.addoption(
         "--check-tests",
         dest="benchtare_check_tests",
         action="store_true",
@@ -294,13 +304,29 @@ def configured_identity(config: pytest.Config) -> list[tuple[str, str]]:
     return values
 
 
+def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
+    pluginmanager.add_hookspecs(hookspecs)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     paths = configured_paths(config)
-    checking = config.getoption("benchtare_check_tests")
-    if checking and config.getoption("benchtare_selftest_only"):
+    checking = config.getoption("benchtare_check_tests") or config.getoption(
+        "benchtare_check_hygiene"
+    )
+    chosen = [
+        option
+        for option, dest in (
+            ("--check-tests", "benchtare_check_tests"),
+            ("--check-hygiene", "benchtare_check_hygiene"),
+            ("--selftest-only", "benchtare_selftest_only"),
+        )
+        if config.getoption(dest)
+    ]
+    if len(chosen) > 1:
         raise pytest.UsageError(
-            "BenchTare: --check-tests and --selftest-only can't be used together: the self-test "
-            "runs before every test check anyway."
+            f"BenchTare: {' and '.join(chosen)} can't be used together: each check runs on its "
+            "own, so its verdict stands on its own (and the self-test runs before every check "
+            "anyway)."
         )
     if paths is None:
         if config.getoption("benchtare_selftest_only") or checking:
@@ -335,6 +361,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         config.stash[_LEVEL],
         selftest_only=bool(config.getoption("benchtare_selftest_only")),
         check_tests=bool(config.getoption("benchtare_check_tests")),
+        check_hygiene=bool(config.getoption("benchtare_check_hygiene")),
         results=config.stash[_RESULTS],
         identify=config.stash[_IDENTIFY],
     )
@@ -342,6 +369,8 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     config.pluginmanager.register(bench_session, SESSION_PLUGIN)
     if bench_session.check_tests:
         config.pluginmanager.register(_CheckRunner(bench_session), "benchtare-check-tests")
+    if bench_session.check_hygiene:
+        config.pluginmanager.register(_HygieneRunner(bench_session), "benchtare-check-hygiene")
 
 
 # --- fixtures ------------------------------------------------------------------------------------
@@ -382,6 +411,7 @@ class BenchSession:
         *,
         selftest_only: bool = False,
         check_tests: bool = False,
+        check_hygiene: bool = False,
         results: Path | None = None,
         identify: Sequence[tuple[str, str]] = (),
     ) -> None:
@@ -393,6 +423,12 @@ class BenchSession:
         # The test check (benchtare.testcheck): the mode of the rerun in progress, if any, and
         # each test's verdict so far.
         self.check_tests = check_tests
+        # The hygiene check (benchtare.hygiene): each test's verdict so far.
+        self.check_hygiene = check_hygiene
+        self.hygiene_checked: list[HygieneTest] = []
+        # Each clean_state: item's value as the session first found it, before any test's setup.
+        self._clean_reference: dict[str, Any] = {}
+        self._hygiene_status: list[tuple[str, str | None, bool | None]] = []
         # The rerun in progress: (mode, the reading it corrupts); (None, None) for the control.
         self._rerun_of: tuple[str | None, int | None] | None = None
         self.checked: list[CheckedTest] = []
@@ -441,7 +477,15 @@ class BenchSession:
         commit, dirty = git_state(config.rootpath)
         run = RunInfo(
             id=run_id,
-            kind="selftest" if self.selftest_only else TEST_CHECK if self.check_tests else "tests",
+            kind=(
+                "selftest"
+                if self.selftest_only
+                else TEST_CHECK
+                if self.check_tests
+                else HYGIENE_CHECK
+                if self.check_hygiene
+                else "tests"
+            ),
             started_at=self._started,
             record_level=self.level.label,
             dut=self.description.name,
@@ -530,6 +574,7 @@ class BenchSession:
         def write(store: SQLiteStore, run: str) -> None:
             store.add_manifest_files(run, manifest)
             self._check_status = store.check_status(run)
+            self._hygiene_status = store.check_status(run, HYGIENE_CHECK)
 
         self._store("the manifest", write)
 
@@ -816,24 +861,217 @@ class BenchSession:
         reporter.write_line(f"Test check: {', '.join(parts) or 'no tests'}")
 
     def _show_check_status(self, reporter: Any) -> None:
-        """For a usual run: which test files the test check hasn't covered as they are now."""
-        never = [path for path, at, _ in self._check_status if at is None]
-        changed = [path for path, at, same in self._check_status if at is not None and not same]
-        if not self._check_status:
-            return
-        if not never and not changed:
+        """For a usual run: which test files each on-demand check hasn't covered as they are
+        now, one line per area."""
+        for area, command, status in (
+            ("test check", "check-tests", self._check_status),
+            ("hygiene check", "check-hygiene", self._hygiene_status),
+        ):
+            never = [path for path, at, _ in status if at is None]
+            changed = [path for path, at, same in status if at is not None and not same]
+            if not status:
+                continue
+            if not never and not changed:
+                reporter.write_line(
+                    f"benchtare {area}: every test file was checked, and none has changed since"
+                )
+                continue
+            parts = []
+            if changed:
+                parts.append(f"changed since their last check: {', '.join(changed)}")
+            if never:
+                parts.append(f"never checked: {', '.join(never)}")
             reporter.write_line(
-                "benchtare test check: every test file was checked, and none has changed since"
+                f"benchtare {area}: {'; '.join(parts)}. Run benchtare {command} to check them."
             )
-            return
-        parts = []
-        if changed:
-            parts.append(f"changed since their last check: {', '.join(changed)}")
-        if never:
-            parts.append(f"never checked: {', '.join(never)}")
-        reporter.write_line(
-            f"benchtare test check: {'; '.join(parts)}. Run benchtare check-tests to check them."
+
+    # --- the hygiene check --------------------------------------------------------------------
+
+    def hygiene_protocol(self, item: pytest.Item, nextitem: pytest.Item | None) -> bool:
+        """Run a test as usual and, if it passed, check its hygiene: compare the clean-state
+        items around that run and around a repeat run straight after it, and look at its waits.
+        Only the usual run is reported and counted."""
+        ihook = item.ihook
+        ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
+        uses_bench = "bench" in getattr(item, "fixturenames", ()) and self.bench is not None
+        before = self._clean_values() if uses_bench else {}
+        runtestprotocol(item, nextitem=nextitem, log=True)
+        if self.results_failure is not None:
+            self._stop_run()
+        normal, _ = _outcome(item.stash.get(_REPORTS, {}))
+        rules: list[hygiene.RuleResult] = []
+        items: list[hygiene.ItemResult] = []
+        records: dict[str, dict[str, list[RecordEntry]]] = {}
+        why = ""
+        if normal != "passed":
+            why = f"it {normal}"
+        elif not uses_bench:
+            why = "it doesn't use the bench"
+        else:
+            readings = list(item.stash.get(_READINGS, []))
+            items += self._clean_after(1, before)  # straight after its teardown
+            before = self._clean_values()
+            repeat = self._rerun(item, nextitem, None, None)
+            records["repeat"] = repeat.records
+            items += self._clean_after(2, before)
+            rules = [
+                _repeats(readings, repeat),
+                _left_clean(self.description.clean_state, items),
+                self._meaningful(readings, repeat.readings),
+            ]
+        verdict = hygiene.verdict(normal, rules)
+        self.hygiene_checked.append(
+            HygieneTest(item.nodeid, normal, verdict, tuple(rules), tuple(items), why)
         )
+        seq = item.stash.get(_SEQ, None)
+        if seq is not None:
+            self._store(
+                f"the hygiene check of {item.nodeid}",
+                lambda store, run: store.add_hygiene(run, seq, verdict, rules, items, records),
+            )
+        ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+        return True
+
+    def _clean_values(self) -> dict[str, Any]:
+        """Each clean_state: item's value now."""
+        probes, _ = self._probe()
+        return {
+            item.name: self._current(item, probes) for item in self.description.clean_state.values()
+        }
+
+    def _current(self, item: hygiene.CleanStateItem, probes: Mapping[str, Any]) -> Any:
+        assert self.bench is not None
+        if item.kind == hygiene.OUTPUT:
+            last = self.bench.last_received(item.name)
+            return hygiene.MISSING if last is None else last.value
+        if item.kind == hygiene.INPUT:
+            return self.bench.written.get(item.name, hygiene.MISSING)
+        return probes.get(item.name, hygiene.MISSING)
+
+    def _probe(self) -> tuple[dict[str, Any], str]:
+        """What the team's pytest_benchtare_state hooks return, merged; and, if one failed,
+        why."""
+        wanted = [i for i in self.description.clean_state.values() if i.kind == hygiene.PROBE]
+        if not wanted or self._config is None:
+            return {}, ""
+        try:
+            results = self._config.hook.pytest_benchtare_state(
+                bench=self.bench, config=self._config
+            )
+        except Exception as exc:  # noqa: BLE001 - the team's hook: report it, don't stop the run
+            return {}, f"the state probe failed: {type(exc).__name__}: {exc}"
+        merged: dict[str, Any] = {}
+        for result in results:
+            merged.update(result or {})
+        return merged, ""
+
+    def _clean_after(self, run: int, before: Mapping[str, Any]) -> list[hygiene.ItemResult]:
+        """Judge each clean_state: item after teardown: at its clean value, or back where it
+        was, given its settle time. Only a run that left it dirty is blamed."""
+        for name, value in before.items():
+            if value is not hygiene.MISSING:
+                self._clean_reference.setdefault(name, value)  # as the session first found it
+        results = []
+        for item in self.description.clean_state.values():
+
+            def read(item: hygiene.CleanStateItem = item) -> Any:
+                probes = self._probe()[0] if item.kind == hygiene.PROBE else {}
+                return self._current(item, probes)
+
+            outcome, after, detail = hygiene.judge(
+                item if item.kind != hygiene.INPUT else replace(item, settle=0.0),
+                before.get(item.name, hygiene.MISSING),
+                read,
+                reference=self._clean_reference.get(item.name, hygiene.MISSING),
+                unknown=self._why_not_known(item),
+                shown=lambda value, name=item.name: self._shown(name, value),
+            )
+            results.append(
+                hygiene.ItemResult(
+                    run,
+                    item.name,
+                    item.kind,
+                    before.get(item.name, hygiene.MISSING),
+                    after,
+                    outcome,
+                    detail,
+                )
+            )
+        return results
+
+    def _why_not_known(self, item: hygiene.CleanStateItem) -> str:
+        if item.kind == hygiene.OUTPUT:
+            return "no value of it had arrived, so it couldn't be compared"
+        if item.kind == hygiene.INPUT:
+            return (
+                "it hadn't been written, so its value isn't known: write it in staging, so "
+                "every test starts from a known value"
+            )
+        _, failed = self._probe()
+        return failed or "no pytest_benchtare_state hook returned it"
+
+    def _shown(self, name: str, value: Any) -> str:
+        signal = self.description.signals.get(name)
+        unit = signal.unit if signal is not None else None
+        return f"{value!r} {unit}" if unit and value is not hygiene.MISSING else repr(value)
+
+    def _meaningful(
+        self, first: Sequence[testcheck.Reading], repeat: Sequence[testcheck.Reading]
+    ) -> hygiene.RuleResult:
+        """No checked wait was already satisfied before the write it followed."""
+        waits = [(run, r) for run, taken in ((1, first), (2, repeat)) for r in taken]
+        waits = [(run, r) for run, r in waits if r.checked and r.waits]
+        if not waits:
+            return hygiene.RuleResult(
+                hygiene.MEANINGFUL, hygiene.NOT_CHECKED, "it has no wait_until in its body"
+            )
+        already = [(run, r) for run, r in waits if r.already]
+        if not already:
+            count = len([r for run, r in waits if run == 1])
+            return hygiene.RuleResult(
+                hygiene.MEANINGFUL,
+                hygiene.PASSED,
+                f"none of its {count} wait{'' if count == 1 else 's'} was already satisfied "
+                "before the write it followed",
+            )
+        run, reading = already[0]
+        when = "" if run == 1 else "run again straight after itself, "
+        return hygiene.RuleResult(
+            hygiene.MEANINGFUL,
+            hygiene.FAILED,
+            f"{when}its wait for {reading.signal} at {reading.where} was already satisfied "
+            f"before the write of {reading.after_write}: {reading.signal} was already "
+            f"{self._shown(reading.signal, reading.before)}, so the test can't tell whether the "
+            "DUT responded",
+        )
+
+    def _show_hygiene(self, reporter: Any) -> None:
+        verbose = reporter.config.getoption("verbose") > 0
+        reporter.write_sep("=", "BenchTare hygiene check")
+        for test in self.hygiene_checked:
+            if test.verdict == hygiene.IS_CLEAN:
+                reporter.write_line(f"{test.nodeid}: clean")
+            elif test.verdict == hygiene.NOT_CLEAN:
+                reporter.write_line(f"{test.nodeid}: NOT CLEAN", red=True, bold=True)
+            else:
+                reason = f", because {test.why}" if test.why else ""
+                reporter.write_line(f"{test.nodeid}: not checked{reason}")
+            for rule in test.rules:
+                if verbose or rule.outcome == hygiene.FAILED:
+                    reporter.write_line(
+                        f"    {hygiene.SAID[rule.rule]}: {rule.outcome}, {rule.detail}",
+                        red=rule.outcome == hygiene.FAILED,
+                    )
+            if verbose:
+                for result in test.items:
+                    reporter.write_line(
+                        f"        run {result.run}, {result.name}: {result.outcome}, "
+                        f"{result.detail}"
+                    )
+        counts = Counter(test.verdict for test in self.hygiene_checked)
+        order = (hygiene.IS_CLEAN, hygiene.NOT_CLEAN, hygiene.NOT_CHECKED)
+        summary = ", ".join(f"{counts[v]} {v}" for v in order if counts[v])
+        reporter.write_line(f"Hygiene check: {summary or 'no tests'}")
 
     # --- hooks ----------------------------------------------------------------------------
 
@@ -994,8 +1232,10 @@ class BenchSession:
             ok = self.selftest.passed
             session.exitstatus = pytest.ExitCode.OK if ok else pytest.ExitCode.TESTS_FAILED
         unable = any(test.verdict == testcheck.UNABLE for test in self.checked)
-        if unable and session.exitstatus == pytest.ExitCode.OK:
-            # A test that can't fail fails the test check.
+        unclean = any(test.verdict == hygiene.NOT_CLEAN for test in self.hygiene_checked)
+        if (unable or unclean) and session.exitstatus == pytest.ExitCode.OK:
+            # A test that can't fail fails the test check; one that isn't clean, the hygiene
+            # check.
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
         stopped = session.exitstatus == pytest.ExitCode.INTERRUPTED
         self._finish_identity(stopped)
@@ -1022,6 +1262,8 @@ class BenchSession:
             terminalreporter.write_line(render(self._after_last_test))
         if self.check_tests:
             self._show_checks(terminalreporter)
+        elif self.check_hygiene:
+            self._show_hygiene(terminalreporter)
         elif self._counts and exitstatus != pytest.ExitCode.INTERRUPTED:
             self._show_check_status(terminalreporter)  # only after tests ran to the end
         if self.results_failure is not None and not self._results_failure_shown:
@@ -1042,6 +1284,114 @@ class CheckedTest:
     def hygiene(self) -> bool:
         """It wasn't checked because it doesn't repeat: a test hygiene problem."""
         return any(r.outcome == testcheck.NOT_REPEATABLE for r in self.results)
+
+
+@dataclass(frozen=True)
+class HygieneTest:
+    """One test's part in the hygiene check."""
+
+    nodeid: str
+    outcome: str  # its usual outcome, as pytest's summary counts it
+    verdict: str  # hygiene.IS_CLEAN, NOT_CLEAN or NOT_CHECKED
+    rules: tuple[hygiene.RuleResult, ...]
+    items: tuple[hygiene.ItemResult, ...]
+    why: str = ""  # why it wasn't checked
+
+
+class _HygieneRunner:
+    """Runs each test through the hygiene check. Registered only with --check-hygiene."""
+
+    def __init__(self, session: BenchSession) -> None:
+        self.session = session
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_protocol(self, item: pytest.Item, nextitem: pytest.Item | None) -> bool:
+        return self.session.hygiene_protocol(item, nextitem)
+
+
+def _repeats(readings: Sequence[testcheck.Reading], repeat: _Rerun) -> hygiene.RuleResult:
+    """Run again straight after itself, the test passes and takes the same readings."""
+
+    def result(outcome: str, detail: str) -> hygiene.RuleResult:
+        return hygiene.RuleResult(hygiene.REPEATS, outcome, detail)
+
+    setup, call, teardown = (repeat.reports.get(phase) for phase in PHASES)
+    if setup is None or not setup.passed or call is None:
+        why = _short_message(setup) if setup is not None else None
+        return result(
+            hygiene.FAILED,
+            f"its staging didn't pass when it ran again straight after itself: "
+            f"{why or 'no report'}",
+        )
+    if not call.passed:
+        return result(
+            hygiene.FAILED,
+            f"it {call.outcome} when it ran again straight after itself, at "
+            f"{_failed_at(call, repeat)}: {_short_message(call)}",
+        )
+    if teardown is not None and teardown.failed:
+        return result(
+            hygiene.FAILED,
+            f"its teardown failed when it ran again straight after itself: "
+            f"{_short_message(teardown)}",
+        )
+    first = [r.signal for r in readings if r.checked]
+    again = [r.signal for r in repeat.taken]
+    if again != first:
+        return result(
+            hygiene.FAILED,
+            f"run again straight after itself, it read {', '.join(again) or 'nothing'} instead "
+            f"of {', '.join(first) or 'nothing'}",
+        )
+    count = len(first)
+    return result(
+        hygiene.PASSED,
+        f"it passed again straight after itself, taking the same {count} "
+        f"reading{'' if count == 1 else 's'}",
+    )
+
+
+def _left_clean(
+    clean_state: Mapping[str, hygiene.CleanStateItem], items: Sequence[hygiene.ItemResult]
+) -> hygiene.RuleResult:
+    """After each run's teardown, every clean_state: item is clean, or no dirtier than this test
+    found it."""
+
+    def result(outcome: str, detail: str) -> hygiene.RuleResult:
+        return hygiene.RuleResult(hygiene.CLEAN, outcome, detail)
+
+    if not clean_state:
+        return result(
+            hygiene.NOT_CHECKED,
+            "the interface description doesn't list what shows the DUT is clean (clean_state:)",
+        )
+
+    # Per item: a change in either run counts against the test. Being clean needs evidence: for
+    # an item with a clean value, either run; without one, only the first, since the repeat run
+    # starts from this test's own end state, so "back where it was" says nothing there.
+    changed: list[hygiene.ItemResult] = []
+    clean: list[str] = []
+    notes: list[str] = []
+    for name, spec in clean_state.items():
+        mine = [item for item in items if item.name == name]
+        dirty = [item for item in mine if item.outcome == hygiene.CHANGED]
+        if dirty:
+            changed.append(dirty[0])
+            continue
+        evidence = mine if spec.has_clean else [item for item in mine if item.run == 1]
+        if any(item.outcome == hygiene.SAME for item in evidence):
+            clean.append(name)
+            continue
+        unjudged = [i for i in mine if i.outcome in (hygiene.INHERITED, hygiene.NOT_COMPARED)]
+        if unjudged:
+            notes.append(unjudged[0].detail)
+    if changed:
+        return result(hygiene.FAILED, "; ".join(item.detail for item in changed))
+    note = "; ".join(notes)
+    if not clean:
+        return result(hygiene.NOT_CHECKED, f"nothing it left could be judged: {note}")
+    detail = f"{', '.join(sorted(clean))} clean after teardown"
+    return result(hygiene.PASSED, f"{detail}; not counted: {note}" if note else detail)
 
 
 class _CheckRunner:

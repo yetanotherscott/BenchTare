@@ -25,7 +25,7 @@ from pathlib import Path
 from benchtare import __version__
 from benchtare.errors import BenchTareError
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Version 1. Each later version adds a migration below instead of changing these.
 TABLES_V1 = (
@@ -189,10 +189,43 @@ def _v1_to_v2(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE manifest_files ADD COLUMN unchanged_since_check INTEGER")
 
 
+def _v2_to_v3(db: sqlite3.Connection) -> None:
+    """Version 3 (M7), the hygiene check: each test's result under each rule, each clean-state
+    item compared, its verdict, and for each test file in a manifest when it was last checked
+    for hygiene."""
+    db.execute(
+        """CREATE TABLE hygiene_checks (
+            run_id TEXT NOT NULL REFERENCES runs (id),
+            test_seq INTEGER NOT NULL,
+            rule TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            PRIMARY KEY (run_id, test_seq, rule)
+        )"""
+    )
+    db.execute(
+        """CREATE TABLE hygiene_items (
+            run_id TEXT NOT NULL REFERENCES runs (id),
+            test_seq INTEGER NOT NULL,
+            run INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            before TEXT,
+            after TEXT,
+            outcome TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            PRIMARY KEY (run_id, test_seq, run, name)
+        )"""
+    )
+    db.execute("ALTER TABLE test_results ADD COLUMN hygiene_verdict TEXT")
+    db.execute("ALTER TABLE manifest_files ADD COLUMN last_hygiene_at TEXT")
+    db.execute("ALTER TABLE manifest_files ADD COLUMN unchanged_since_hygiene INTEGER")
+
+
 # MIGRATIONS[n] upgrades a database from version n to version n + 1. A new database is created
 # at version 1 and brought up through the same steps, so every database ends up the same.
 Migration = Callable[[sqlite3.Connection], None]
-MIGRATIONS: dict[int, Migration] = {1: _v1_to_v2}
+MIGRATIONS: dict[int, Migration] = {1: _v1_to_v2, 2: _v2_to_v3}
 
 BUSY_TIMEOUT_MS = 5000  # how long to wait for another run's write before giving up
 _RETRY_PAUSE = 0.02  # seconds between tries when SQLite answers "busy" without waiting

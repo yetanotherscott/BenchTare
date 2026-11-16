@@ -344,80 +344,36 @@ bench gained a fifth input, `io.in5`, so the IO harness carries it too.
   in tests, and ranges from standards plus boundary-value helpers are later
   stages 7 and 13.
 
-### M7: Test hygiene
+### M7: Test hygiene (done)
 
 The third of the areas BenchTare verifies (see "What BenchTare verifies" in
-`docs/model.md`): that each test stands on its own. It is checked on its own,
-with its own verdicts, report and stored results, separately from the bench
-and harness (M4) and from test logic (M6). M7 is about getting the logic of the
-checks right; a more realistic reference to exercise them against comes later.
+`docs/model.md`): that each test stands on its own, checked on its own, with
+its own verdicts, report and stored results. M7 gets the logic of the checks
+right; a more realistic reference to exercise them against comes later.
 
-**What a clean DUT is.** The interface description gets a `clean_state:` list
-of the signals that indicate the DUT is clean, by name only, like `identity:`.
-Only these are compared, so nothing is tested beyond what the team says
-matters. As a list, or as a mapping when an item needs options:
-
-```yaml
-clean_state:
-  Mode:
-  supply_enable:
-  Measured: {tolerance: 0.1, settle: 2.0}
-  fault_log:            # a state probe, not a signal
-```
-
-- `tolerance:` (numbers only): how far apart two values may be and still be the
-  same, for a noisy reading. The team's definition of "the same", not a pass
-  criterion. Default 0: exactly equal. Bools, enums and text always compare
-  exactly.
-- `settle:` (seconds): how long after teardown the item has to come back before
-  it counts as left behind. Default 1.0, like other timeouts.
-- An output's value before setup is the latest value received; after teardown,
-  the check waits up to `settle:` for a value that matches. An input's value is
-  the one the bench last wrote; an input never written before the test has no
-  known clean value, and is reported as not compared.
-- **State probes** cover state that no signal shows, such as a file on an
-  embedded Linux target, a parameter in NVM or a stored fault code. The team
-  implements a hook in `conftest.py` that returns named values, reached however
-  the team likes (SSH, a serial console, UDS). BenchTare calls it before setup
-  and after teardown (again until `settle:` runs out), and compares the names
-  listed in `clean_state:`. BenchTare owns the comparison, the team owns the
-  access.
-
-**The three rules,** each with its own verdict line per test:
-
-1. **It repeats.** Run twice in a row, the test passes both times and takes the
-   same readings in the same order.
-2. **It leaves the DUT clean.** After each run's teardown, every `clean_state:`
-   item is back at its value from before that run's setup (within its
-   tolerance, given its settle time). A failure names the item, both values and
-   the test.
-3. **It starts from a meaningful state.** No `wait_until` in the test's body was
-   already satisfied by the value from before the test's most recent write: the
-   DUT wasn't already where the test waits for it to go, so the test can tell
-   whether the DUT responded. Only waits are judged, because a wait says the
-   test expects a reaction; a `read` after writing an unrelated signal says
-   nothing. `check=False` waits are left out.
-
-- `pytest --check-hygiene` and `benchtare check-hygiene` run the tests as
-  usual, then check each one that passed. Verdicts: clean, not clean (with each
-  rule it broke), and not checked (it didn't pass to begin with, or a lower
-  area failed). A test that isn't clean makes the exit code 1. Rule 2 is "not
-  checked" for a DUT whose interface description has no `clean_state:`.
-- Separate from the test check: `--check-hygiene` and `--check-tests` aren't
-  combined in one run, so each area's verdict stands on its own.
-- Results schema version 3: each test's result under each rule, and each
-  `clean_state:` item compared, with its values before and after.
-- A usual run's closing line covers hygiene as well as test logic: which test
-  files were never hygiene-checked, or changed since.
-- Tests, against the reference as it is:
-  - a clean test passes all three rules;
-  - a test that leaves `Mode` in `run`, one that leaves `supply_enable` on, one
-    that doesn't repeat, and one whose wait was already satisfied before its
-    write, are each caught, with the item, values and line;
-  - a state probe that a test changes is caught; one it leaves alone isn't;
-  - tolerance and settle are proven with values that differ, and values that
-    arrive late, since the reference itself is exact and immediate;
-  - each rule broken on purpose, to prove the tests catch it.
+- `clean_state:` in the interface description lists what shows the DUT is
+  clean, by name, with its clean value where the team knows one (`Mode:
+  standby`), `tolerance:` for noisy numbers and `settle:` for time to come back.
+  Items without a clean value are compared before setup and after teardown.
+  State probes (`probe: true`) are values a `pytest_benchtare_state` hook in
+  `conftest.py` returns, for state no signal shows.
+- `benchtare/hygiene.py`: the rules, verdicts and the judgement of each item,
+  as pure functions. The bench remembers the value last written to each input,
+  and notes a `wait_until` already satisfied before the most recent write.
+- `pytest --check-hygiene` and `benchtare check-hygiene` run each test as
+  usual, then again straight after itself, and judge three rules: it repeats,
+  it leaves the DUT clean, it starts from a meaningful state. Only the test that
+  left an item dirty is blamed: one that finds it dirty and leaves it so isn't,
+  and one that puts it back is clean. A test that isn't clean makes the exit
+  code 1. Not combined with `--check-tests` in one run.
+- Results schema version 3: `hygiene_checks`, `hygiene_items`,
+  `test_results.hygiene_verdict`, and each test file's last hygiene check in
+  `manifest_files`. A usual run's closing lines cover both on-demand checks.
+- Tests, against the reference as it is: a clean test; a test that leaves an
+  input or an output dirty; one that finds it dirty and leaves it, or cleans it
+  up; one that doesn't repeat; a wait already satisfied before its write, in
+  the first run or the repeat; a state probe; tolerance and settle with values
+  that differ or arrive late; and each rule broken on purpose.
 
 ### M8: DUT model plugins
 

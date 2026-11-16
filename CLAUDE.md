@@ -109,6 +109,7 @@ pytest                     # run the test suite
 ruff check . && ruff format --check .
 benchtare selftest --dut … --bench … --harness …   # the self-test alone
 benchtare check-tests --dut … --bench … --harness …   # prove each test can fail
+benchtare check-hygiene --dut … --bench … --harness …   # prove each test stands on its own
 ```
 
 ## Decisions already made

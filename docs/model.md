@@ -473,7 +473,7 @@ BenchTare verifies five areas, each a different question with its own check:
 | --- | --- | --- | --- | --- |
 | 1 | **Bench** | Is every equipment item working? | The bench check (self-test) | Before every session |
 | 2 | **Harness** | Is everything wired as the harness file says, and is the DUT there? | The harness check (self-test) | Before every session |
-| 3 | **Test hygiene** | Do setup and teardown leave the DUT in a known state, so each test stands on its own? | The hygiene check (M7) | On demand |
+| 3 | **Test hygiene** | Do setup and teardown leave the DUT in a known state, so each test stands on its own? | The hygiene check | On demand |
 | 4 | **Test logic** | Can every check in each test fail? | The test check | On demand |
 | 5 | **The DUT** | Does the DUT do what its requirements say? | The team's tests | Every run |
 
@@ -544,36 +544,74 @@ from the ini file. Other options go to pytest. It lists every check, and exits
 stored, and 4 when it couldn't start (BenchTare isn't configured, or a file is
 wrong).
 
-### Test hygiene: the hygiene check (planned, M7)
+### Test hygiene: the hygiene check (on demand)
 
 A test stands on its own when its staging puts the DUT into a known state and
 its teardown leaves it clean. What "clean" means is the team's to say: the
-interface description lists, by name, the signals that show it, and any state
-probes for state no signal shows (a file on an embedded Linux target, a
-parameter in NVM, a stored fault code):
+interface description's `clean_state:` lists what shows it, by name, with the
+clean value where the team knows one:
 
 ```yaml
 clean_state:
-  Mode:
-  supply_enable:
-  Measured: {tolerance: 0.1, settle: 2.0}
+  Mode: standby                 # its clean value
+  supply_enable: false
+  Measured: {clean: 0.0, tolerance: 0.1, settle: 2.0}
+  boot_count:                   # no clean value: compared before and after
+  fault_log: {probe: true}      # state no signal shows
 ```
 
-Only these are compared, so nothing is tested beyond what matters. A
-`tolerance:` says how far apart two readings may be and still be the same; a
-`settle:` gives an item time to come back after teardown. The hygiene check
-will verify three rules for each test that passed, each with its own verdict:
+Only these items are compared, so nothing is tested beyond what matters.
 
-- **It repeats:** run twice in a row, it passes both times and takes the same
-  readings.
-- **It leaves the DUT clean:** after teardown, every `clean_state:` item is
-  back at its value from before setup.
-- **It starts from a meaningful state:** no `wait_until` in its body was already
-  satisfied before the test's most recent write, so the test can tell whether
-  the DUT responded.
+- **A clean value**, where given, is what the item must be after teardown. It is
+  the team's definition of clean, not a judgement of the DUT's behaviour.
+  Without one, the item must be back where it was before setup, which has two
+  limits: an item with no known value before setup (an input the session
+  hasn't written yet) can't be judged, and the repeat run proves nothing for
+  it, since it starts from the test's own end state. Give inputs a clean value:
+  the bench always knows what it wrote.
+- **`tolerance:`** says how far apart two numbers may be and still be the same,
+  for a noisy reading. **`settle:`** gives an output or a probe time to come
+  back after teardown (default 1 s).
+- **An output's** value is the latest one received; **an input's** is the one
+  the bench last wrote, so an input never written has no known value: write it
+  in staging, so every test starts from a known state.
+- **State probes** cover state no signal shows: a file on an embedded Linux
+  target, a parameter in NVM, a stored fault code. The team writes a
+  `pytest_benchtare_state(bench, config)` hook in `conftest.py` that returns
+  named values, reached however it likes (SSH, a serial console, UDS);
+  BenchTare calls it before setup and after teardown, and compares the names
+  listed with `probe: true`.
 
-Until then, the test check notices a test that doesn't repeat, and reports its
-logic as not checked, because of test hygiene.
+**The three rules,** each with its own verdict line per test:
+
+| Rule | Passes when |
+| --- | --- |
+| It repeats | Run again straight after itself, it passes and takes the same readings in the same order |
+| It leaves the DUT clean | After each run's teardown, every `clean_state:` item is at its clean value, or back where it was before setup |
+| It starts from a meaningful state | No `wait_until` in its body was already satisfied by the value from before the test's most recent write, in either run |
+
+**Only the test that left a mess is blamed.** A test that finds an item dirty,
+because an earlier test left it so, and doesn't change it, isn't counted
+against: "Mode was already 'run' before setup, not its clean value 'standby':
+an earlier test left it so". A test whose staging or teardown puts it back is
+clean. The test that left it is the one reported: "Mode was still 'run' 1 s
+after teardown, not its clean value 'standby' (it was 'standby' before setup)".
+
+The third rule judges only waits, because a wait says the test expects the DUT
+to react; a `read` after writing an unrelated signal says nothing. It looks at
+the repeat run too, where the test starts from its own end state: a staging
+that doesn't set a starting point of its own shows up there.
+
+`benchtare check-hygiene` (or `pytest --check-hygiene`) runs the tests as
+usual, then runs each one that passed again straight after itself. A test that
+isn't clean makes the exit code 1; one that didn't pass to begin with isn't
+checked. The report lists what needs attention; `-v` shows every rule and every
+item compared. Its results are stored, and a usual run ends with a line naming
+any test file that was never hygiene-checked, or has changed since.
+
+The hygiene check and the test check are separate runs, so each area's verdict
+stands on its own. Meanwhile, the test check still notices a test that doesn't
+repeat, and reports its logic as not checked, because of test hygiene.
 
 ### Test logic: the test check (on demand)
 

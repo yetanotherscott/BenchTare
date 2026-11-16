@@ -71,6 +71,12 @@ class Reading:
     checked: bool = True  # False when taken with check=False
     corrupted: bool = False  # the test check gave the test a different value from what arrived
     note: str = ""  # why the test check's mode couldn't change it, when it couldn't
+    # For test hygiene: a wait already satisfied by the value from before the most recent write
+    # (that value, and which write).
+    waits: bool = False  # a wait_until, which says the test expects the DUT to react
+    already: bool = False
+    before: Any = None
+    after_write: str = ""
 
 
 @dataclass(frozen=True)

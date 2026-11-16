@@ -11,6 +11,7 @@ import time
 import pytest
 
 from benchtare.dut.identity import IdentityValue
+from benchtare.hygiene import ItemResult, RuleResult
 from benchtare.record import RecordEntry, RecordLevel
 from benchtare.results import schema
 from benchtare.results.manifest import ManifestFile
@@ -32,6 +33,8 @@ TABLES = {
     "test_results",
     "record_entries",
     "test_checks",  # version 2
+    "hygiene_checks",  # version 3
+    "hygiene_items",
 }
 NEXT = SCHEMA_VERSION + 1  # a stand-in for the next version, to test upgrading in general
 
@@ -76,9 +79,9 @@ def tables(db):
 def test_a_new_database_is_created_at_the_current_version(path):
     db = open_database(path)
     assert tables(db) == TABLES
-    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
     meta = dict(db.execute("SELECT key, value FROM meta"))
-    assert meta["schema_version"] == "2"
+    assert meta["schema_version"] == "3"
     assert meta["created_by"].startswith("benchtare ")
     db.close()
 
@@ -172,6 +175,14 @@ def store_a_whole_run(store, run_id, *, finish=True):
         ],
         {"reading 1 shift": {"call": [RecordEntry("read", RecordLevel.RESULTS, "r", shifted)]}},
     )
+    store.add_hygiene(
+        run_id,
+        1,
+        f"hygiene of {run_id}",  # different in each run, so a write to another run shows
+        [RuleResult("clean", "failed", "Mode was still 'run' after teardown")],
+        [ItemResult(1, "Mode", "output", "standby", "run", "changed", "Mode was still 'run'")],
+        {"repeat": {"call": [RecordEntry("read", RecordLevel.RESULTS, "r", read)]}},
+    )
     if finish:
         store.finish_run(run_id, status="finished", exit_code=1, counts={"failed": 1})
 
@@ -254,6 +265,51 @@ def test_each_test_file_says_when_it_was_last_checked(store):
     assert store.check_status("same") == [("t.py", checked_at, True)]
     assert store.check_status("changed") == [("t.py", checked_at, False)]
     assert store.check_status("other-dut") == [("t.py", None, None)]
+
+
+def test_each_check_keeps_its_own_last_check(store):
+    checked_file(store, "check", "check-tests", "aa")
+    checked_file(store, "hygiene", "check-hygiene", "aa")
+    checked_file(store, "plain", "tests", "aa")
+    times = dict(store.db.execute("SELECT id, started_at FROM runs"))
+    assert store.check_status("plain") == [("t.py", times["check"], True)]
+    assert store.check_status("plain", "check-hygiene") == [("t.py", times["hygiene"], True)]
+
+
+def test_a_tests_hygiene_is_stored_with_its_rules_items_and_repeat(store):
+    from benchtare.hygiene import MISSING
+
+    store.start_run(run_info(kind="check-hygiene"))
+    store.add_test("run-1", TestResult(1, "t.py::a", "t.py", "passed", time.time()))
+    store.add_hygiene(
+        "run-1",
+        1,
+        "not clean",
+        [
+            RuleResult("repeats", "passed", "it passed again"),
+            RuleResult("clean", "failed", "Mode was still 'run'"),
+            RuleResult("meaningful start", "not checked", "it has no wait_until"),
+        ],
+        [
+            ItemResult(1, "Mode", "output", "standby", "run", "changed", "Mode was still 'run'"),
+            ItemResult(1, "Setpoint", "input", MISSING, 0.0, "not compared", "never written"),
+        ],
+        {"repeat": {"call": [RecordEntry("read", RecordLevel.RESULTS, "r", {"value": 1})]}},
+    )
+    db = store.db
+    assert db.execute("SELECT hygiene_verdict FROM test_results").fetchall() == [("not clean",)]
+    assert db.execute("SELECT rule, outcome FROM hygiene_checks ORDER BY rule").fetchall() == [
+        ("clean", "failed"),
+        ("meaningful start", "not checked"),
+        ("repeats", "passed"),
+    ]
+    assert db.execute(
+        "SELECT name, kind, before, after, outcome FROM hygiene_items ORDER BY name"
+    ).fetchall() == [
+        ("Mode", "output", '"standby"', '"run"', "changed"),
+        ("Setpoint", "input", None, "0.0", "not compared"),  # nothing known before: null
+    ]
+    assert db.execute("SELECT phase FROM record_entries").fetchall() == [("repeat call",)]
 
 
 def test_a_check_that_never_finished_doesnt_count(store):
@@ -388,21 +444,24 @@ def version_1_database(path, monkeypatch):
         db.close()
 
 
-def test_a_version_1_database_is_upgraded_to_version_2_keeping_its_runs(path, monkeypatch):
+def test_a_version_1_database_is_upgraded_to_the_current_version_keeping_its_runs(
+    path, monkeypatch
+):
     version_1_database(path, monkeypatch)
     before = sqlite3.connect(path)
     assert schema.schema_version(before) == 1
     assert "test_checks" not in tables(before)
     before.close()
     store = SQLiteStore(path)
-    assert schema.schema_version(store.db) == 2
-    assert "test_checks" in tables(store.db)
+    assert schema.schema_version(store.db) == 3
+    assert {"test_checks", "hygiene_checks", "hygiene_items"} <= tables(store.db)
     assert store.db.execute(
-        "SELECT nodeid, outcome, check_verdict FROM test_results"
-    ).fetchall() == [("t.py::a", "passed", None)]
+        "SELECT nodeid, outcome, check_verdict, hygiene_verdict FROM test_results"
+    ).fetchall() == [("t.py::a", "passed", None, None)]
     assert store.db.execute(
-        "SELECT path, last_checked_at, unchanged_since_check FROM manifest_files"
-    ).fetchall() == [("t.py", None, None)]
+        "SELECT path, last_checked_at, unchanged_since_check, last_hygiene_at, "
+        "unchanged_since_hygiene FROM manifest_files"
+    ).fetchall() == [("t.py", None, None, None, None)]
     store.start_run(run_info("new"))  # and a new run can be stored in it
     store.close()
     backup = sqlite3.connect(path.with_name("results.sqlite3.v1.bak"))

@@ -146,6 +146,10 @@ class Bench:
         self.readings: list[Reading] = []
         self.corruption: str | None = None
         self.corrupt_at: int | None = None
+        # For test hygiene: the value last written to each DUT input, and the most recent write
+        # (its signal, and the test's line that made it).
+        self.written: dict[str, Any] = {}
+        self.last_write: tuple[str, str] | None = None
 
     @property
     def record_level(self) -> RecordLevel:
@@ -251,6 +255,8 @@ class Bench:
         )
         with self._buffer.writing():
             backend.write(binding, value)
+        self.written[binding.key] = value
+        self.last_write = (binding.key, _caller())
 
     def read(
         self, signal: Signal | str, timeout: float = DEFAULT_TIMEOUT, *, check: bool = True
@@ -328,6 +334,8 @@ class Bench:
         )
         want = getattr(expected, "__name__", None) if _is_predicate(expected) else None
         expecting = want or repr(expected)
+        reading.waits = True
+        self._note_starting_point(binding, reading, matches)
         started = time.monotonic()
         item = self._buffer.wait_for_match(
             binding.key, lambda value: matches(self._as_read(binding, value, reading)[1]), timeout
@@ -417,6 +425,24 @@ class Bench:
             f"{binding.key} did not reach {expecting} within {timeout:g} s (on "
             f"{binding.endpoint}): {count} arrived {since}, the last {_shown(binding, value)}"
         )
+
+    def _note_starting_point(
+        self, binding: Binding, reading: Reading, matches: Callable[[Any], bool]
+    ) -> None:
+        """For test hygiene: whether the value from before the most recent write already
+        satisfied this wait, so the DUT was already where the test waits for it to go."""
+        before = self._buffer.before_write(binding.key)
+        if before is None or self.last_write is None or not reading.checked:
+            return
+        try:
+            already = bool(matches(before.value))
+        except Exception:  # noqa: BLE001 - the test's own predicate, on a value it never saw
+            already = False
+        if already:
+            signal, where = self.last_write
+            reading.already = True
+            reading.before = before.value
+            reading.after_write = f"{signal} at {where}" if where else signal
 
     def _start_reading(self, binding: Binding, check: bool) -> Reading:
         """Log a reading the test is taking: its number among the checked ones, and where."""

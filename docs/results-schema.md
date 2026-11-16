@@ -1,10 +1,11 @@
 # Results schema
 
-**Status: version 2 is built (M6).** Version 1 (M5) is the schema below;
-version 2 adds the test check (see "Version 2" below). M7 will add version 3
-(test hygiene) and M10 version 4 (requirements). A new database is created at version 1 and brought up through the
-same migrations as an old one, so every database ends up the same. Changing it
-means a new version and a migration, never a silent change.
+**Status: version 3 is built (M7).** Version 1 (M5) is the schema below;
+version 2 adds the test check and version 3 the hygiene check (see below), and
+M10 will add version 4 (requirements). A new database is created at version 1
+and brought up through the same migrations as an old one, so every database
+ends up the same. Changing it means a new version and a migration, never a
+silent change.
 
 ## What it has to serve
 
@@ -333,10 +334,45 @@ Version 2 also tells two `wait_until` outcomes apart in `data.outcome`:
 `assert`), and `timeout` when nothing arrived. In version 1 rows, `timeout`
 covers both.
 
+## Version 3 (M7): the hygiene check
+
+Migration 2 to 3 adds:
+
+- **`hygiene_checks`**: one row per test and rule of a hygiene check run
+  (`runs.kind` is `check-hygiene`).
+
+  | Column | Type | Notes |
+  | --- | --- | --- |
+  | `run_id` | TEXT, not null | |
+  | `test_seq` | INTEGER, not null | The test, as `test_results.seq` |
+  | `rule` | TEXT, not null | `repeats`, `clean` or `meaningful start` |
+  | `outcome` | TEXT, not null | `passed`, `failed` or `not checked` |
+  | `detail` | TEXT, not null | What was found, with items, values and lines |
+
+  Primary key: `run_id, test_seq, rule`.
+- **`hygiene_items`**: one row per `clean_state:` item, test and run (1 for
+  the usual run, 2 for the repeat straight after it).
+
+  | Column | Type | Notes |
+  | --- | --- | --- |
+  | `run_id`, `test_seq` | | As above |
+  | `run` | INTEGER, not null | 1 or 2 |
+  | `name` | TEXT, not null | The item |
+  | `kind` | TEXT, not null | `output`, `input` or `probe` |
+  | `before`, `after` | TEXT | JSON values before setup and after teardown; null when none was known |
+  | `outcome` | TEXT, not null | `same` (clean), `changed` (this run left it dirty), `left by an earlier test` or `not compared` |
+  | `detail` | TEXT, not null | What to say about it |
+
+  Primary key: `run_id, test_seq, run, name`.
+- **`test_results.hygiene_verdict`** (TEXT): `clean`, `not clean` or `not
+  checked`; null outside a hygiene check run.
+- **`manifest_files.last_hygiene_at`** and
+  **`manifest_files.unchanged_since_hygiene`**, like the test check's columns.
+- **The repeat run's record** goes into `record_entries` with the phases
+  `repeat setup`, `repeat call` and `repeat teardown`.
+
 ## Later versions (designed now, built in their milestones)
 
-- **Version 3, M7** — the hygiene check's results per test; designed at the
-  start of M7.
 - **Version 4, M10** — `test_requirements`: `run_id`, `test_seq`,
   `requirement_id`.
 

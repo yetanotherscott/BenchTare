@@ -14,6 +14,11 @@ Signals can be listed directly, imported from DBC files, or both. See docs/model
     identity:                 # what each run records about the DUT; names only, never values
       hardware_revision:
       bootloader: {signal: BootloaderVersion}
+    clean_state:              # what shows the DUT is clean, for the hygiene check
+      Mode: standby           # its clean value, where the team knows it
+      Measured: {clean: 0.0, tolerance: 0.1, settle: 2.0}
+      boot_count:             # no clean value: compared before setup and after teardown
+      fault_log: {probe: true}  # state no signal shows, from a pytest_benchtare_state hook
     standards: []             # reserved; no standard is available yet
 
 Numeric signals must declare a unit. ``unit: none`` says a signal deliberately has none.
@@ -35,6 +40,7 @@ import cantools
 from benchtare._yaml import YAML_VALUE_WORDS, count, kind_of, read_mapping
 from benchtare.dut.identity import DEFAULT_WITHIN, IdentityItem, name_problem
 from benchtare.errors import ConfigError, Problem
+from benchtare.hygiene import DEFAULT_SETTLE, INPUT, MISSING, OUTPUT, PROBE, CleanStateItem
 from benchtare.signals.model import (
     NUMERIC_TYPES,
     Direction,
@@ -51,8 +57,9 @@ KIND = "interface description"
 # The unit to write for a numeric signal that has no unit.
 NO_UNIT = "none"
 
-_TOP_KEYS = ("dut", "can", "signals", "overrides", "identity", "standards")
+_TOP_KEYS = ("dut", "can", "signals", "overrides", "identity", "clean_state", "standards")
 _IDENTITY_KEYS = ("signal", "within")
+_CLEAN_STATE_KEYS = ("clean", "tolerance", "settle", "probe")
 _CAN_KEYS = ("node", "dbc")
 _SIGNAL_KEYS = ("type", "direction", "unit", "values")
 _OVERRIDE_KEYS = ("name", "unit", "direction")
@@ -88,6 +95,8 @@ class InterfaceDescription:
     can_signals: Mapping[str, CanSignalRef] = field(default_factory=dict)
     # The items each run is expected to collect about the DUT, by name.
     identity: Mapping[str, IdentityItem] = field(default_factory=dict)
+    # What shows the DUT is clean, for the hygiene check, by name.
+    clean_state: Mapping[str, CleanStateItem] = field(default_factory=dict)
 
     @property
     def files(self) -> tuple[Path, ...]:
@@ -137,7 +146,9 @@ def load_interface_description(path: str | os.PathLike[str]) -> InterfaceDescrip
     _apply_overrides(data.get("overrides", {}), candidates, skipped, can_node, problems)
 
     signals = _build_signals(candidates, problems)
-    identity = _load_identity(data.get("identity"), {s.name: s for s in signals}, problems)
+    by_name = {s.name: s for s in signals}
+    identity = _load_identity(data.get("identity"), by_name, problems)
+    clean_state = _load_clean_state(data.get("clean_state"), by_name, problems)
     if not problems and not signals:
         problems.append(
             Problem(
@@ -165,6 +176,7 @@ def load_interface_description(path: str | os.PathLike[str]) -> InterfaceDescrip
         dbc_files=dbc_files,
         can_signals=MappingProxyType(can_signals),
         identity=MappingProxyType(identity),
+        clean_state=MappingProxyType(clean_state),
     )
 
 
@@ -284,6 +296,145 @@ def _load_identity(
         if ok:
             items[name] = IdentityItem(name, signal=signal_name, within=float(within))
     return items
+
+
+def _load_clean_state(
+    section: Any, signals: Mapping[str, Signal], problems: list[Problem]
+) -> dict[str, CleanStateItem]:
+    """``clean_state:``, a list of names, or a mapping of name to options."""
+    if section is None:
+        return {}
+    example = "for example  clean_state: [Mode, supply_enable]"
+    if isinstance(section, list):
+        entries: list[tuple[Any, Any]] = [(name, None) for name in section]
+    elif isinstance(section, dict):
+        entries = list(section.items())
+    else:
+        problems.append(
+            Problem(
+                f"'clean_state:' must list what shows the DUT is clean, not {kind_of(section)}",
+                hint=example,
+            )
+        )
+        return {}
+    items: dict[str, CleanStateItem] = {}
+    for name, spec in entries:
+        where = "clean_state"
+        if not isinstance(name, str):
+            problems.append(
+                Problem(
+                    f"an item's name was read as {kind_of(name)}",
+                    where=where,
+                    hint="put it in quotes to make it a name, for example  '2':",
+                )
+            )
+            continue
+        if name in items:
+            problems.append(Problem(f"'{name}' is listed twice", where=where))
+            continue
+        where = f"clean_state: {name}"
+        if spec is None:
+            spec = {}
+        elif isinstance(spec, (str, int, float, bool)):
+            spec = {"clean": spec}  # the short way to give its clean value
+        if not isinstance(spec, dict):
+            problems.append(
+                Problem(
+                    f"must be empty, its clean value, or its options, not {kind_of(spec)}",
+                    where=where,
+                    hint=f"for example  {name}: standby, or  {name}: {{clean: 0.0, tolerance: "
+                    "0.1, settle: 2.0}",
+                )
+            )
+            continue
+        _check_keys(spec, _CLEAN_STATE_KEYS, f"in {where}", problems)
+        item = _clean_state_item(name, spec, signals, where, problems)
+        if item is not None:
+            items[name] = item
+    return items
+
+
+def _clean_state_item(
+    name: str,
+    spec: Mapping[str, Any],
+    signals: Mapping[str, Signal],
+    where: str,
+    problems: list[Problem],
+) -> CleanStateItem | None:
+    probe = spec.get("probe", False)
+    if not isinstance(probe, bool):
+        problems.append(Problem("'probe:' must be true or false", where=where))
+        return None
+    signal = signals.get(name)
+    if probe and signal is not None:
+        problems.append(
+            Problem(
+                f"'{name}' is a signal, so it isn't a state probe",
+                where=where,
+                hint="leave out 'probe: true' to compare the signal",
+            )
+        )
+        return None
+    if not probe and signal is None:
+        problems.append(
+            Problem(
+                f"'{name}' isn't a signal in this interface description",
+                where=where,
+                hint=f"{_close_signal(name, signals)}; or, for state no signal shows, mark it "
+                f"as a state probe:  {name}: {{probe: true}}",
+            )
+        )
+        return None
+    if probe and (problem := name_problem(name)):
+        problems.append(Problem(problem.replace("an identity item", "a state probe"), where=where))
+        return None
+    ok = True
+    tolerance = spec.get("tolerance", 0.0)
+    if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or tolerance < 0:
+        problems.append(Problem("'tolerance:' must be a number, 0 or more", where=where))
+        ok = False
+    elif tolerance and signal is not None and signal.type not in NUMERIC_TYPES:
+        problems.append(
+            Problem(
+                f"'tolerance:' is for numbers, and {name} is {signal.type.value}, which always "
+                "compares exactly",
+                where=where,
+            )
+        )
+        ok = False
+    settle = spec.get("settle", DEFAULT_SETTLE)
+    if isinstance(settle, bool) or not isinstance(settle, (int, float)) or settle < 0:
+        problems.append(Problem("'settle:' must be a number of seconds, 0 or more", where=where))
+        ok = False
+    clean = spec.get("clean", MISSING)
+    if clean is not MISSING and (problem := _clean_value_problem(signal, clean)):
+        problems.append(Problem(f"its clean value {clean!r} {problem}", where=where))
+        ok = False
+    if not ok:
+        return None
+    kind = PROBE if signal is None else OUTPUT if signal.direction is Direction.OUTPUT else INPUT
+    if clean is not MISSING and signal is not None and signal.type is SignalType.FLOAT:
+        clean = float(clean)
+    return CleanStateItem(name, kind, float(tolerance), float(settle), clean)
+
+
+def _clean_value_problem(signal: Signal | None, value: Any) -> str | None:
+    """Why ``value`` can't be a signal's clean value, or None if it can."""
+    if value is None or not isinstance(value, (str, int, float, bool)):
+        return "must be a single value, such as standby, false or 0.0"
+    if signal is None:
+        return None  # a state probe's values are the team's own
+    if signal.type is SignalType.BOOL:
+        return None if isinstance(value, bool) else "isn't true or false"
+    if signal.type is SignalType.ENUM:
+        if value in signal.values:
+            return None
+        return f"isn't one of {signal.name}'s values: {', '.join(signal.values)}"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return f"isn't a number, and {signal.name} is {signal.type.value}"
+    if signal.type is SignalType.INT and not float(value).is_integer():
+        return f"isn't a whole number, and {signal.name} is int"
+    return None
 
 
 # --- CAN imports -------------------------------------------------------------------------------
