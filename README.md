@@ -2,29 +2,61 @@
 
 A self-verifying HIL/SIL test framework for embedded systems, built on pytest.
 
-**Status: planning.** Nothing here is usable yet. The 0.0.1 release exists to
-establish the package name while the first slice is built.
+**Status: in development, not released yet.** Most of the first slice is
+built: everything below runs on a laptop, against a simulated reference DUT or
+a team's own DUT model. Next is a quickstart (`benchtare init`); hardware
+backends come after the first slice. It runs on Linux, Windows and macOS, with
+Python 3.10 or later and pytest 7.4 or later.
 
-## What it will do
+## What it does
 
-BenchTare gives an embedded team a complete test bench out of the box, for
-hardware or simulation, and proves that its own results are reliable.
+BenchTare gives an embedded team a complete test bench, for hardware or
+simulation, and proves that its own results can be trusted.
 
-- You describe your device (an interface description, which can import DBC
-  files), your bench equipment, and the harness that connects them. You write
-  plain pytest tests against named signals.
-- It verifies everything under the DUT, each area on its own, so a pass or a
-  fail reflects the device and not the setup:
-  - before each run, the bench and the harness check themselves: equipment
-    healthy, loopbacks reading back, DUT present. If not, the run doesn't
-    start;
-  - on demand, it proves each test can fail at every check, by corrupting what
-    it reads, one reading at a time;
-  - on demand (planned), it proves each test stands on its own: it repeats,
-    leaves nothing behind and starts from a meaningful state.
-- The same tests run on a simulated bench or on real hardware.
-- Every run is recorded in a database with a manifest of what was tested.
-- Requirements are optional. When you have them, tests trace to them.
+- **You describe the setup, and write plain pytest.** An interface description
+  lists your device's signals (inline, or imported from DBC files); a bench
+  file lists your equipment; a harness file says which signal is on which
+  channel. Tests use named signals through a `bench` fixture, and need no
+  BenchTare imports.
+- **It verifies everything under the device, each area on its own,** so a pass
+  or a fail reflects the device and not the setup around it:
+
+  | Area | Verified by | When |
+  | --- | --- | --- |
+  | The bench | The self-test's bench check: every equipment item is healthy | Before every run |
+  | The harness | The self-test's harness check: loopbacks read back, the DUT is present | Before every run |
+  | Test hygiene | `benchtare check-hygiene`: each test repeats, leaves the DUT clean, and starts from a meaningful state | On demand |
+  | Test logic | `benchtare check-tests`: each test can fail at every check, proven by corrupting what it reads, one reading at a time | On demand |
+  | The DUT | Your tests | Every run |
+
+  A failure in a lower area makes the areas above it "not checked", never a
+  verdict of their own.
+- **It runs without hardware.** A simulated reference DUT, bench and harness
+  ship with the package, and you can describe your own DUT as a model in
+  Python, so tests and checks run on a laptop or in CI.
+- **Every run is recorded** in a local results database: each test's outcome
+  and every reading, comparison and stimulus, with a manifest of what was
+  tested (file hashes, git commit), the machine it ran on, the bench equipment,
+  and the DUT's hardware and software versions.
+- **Requirements are optional,** and planned: tests will trace to them when you
+  have them.
+
+## Commands
+
+BenchTare is a pytest plugin, so tests run with `pytest`. Give it the three
+files on the command line, or set them in your pytest configuration:
+
+```bash
+pytest --dut my.dut.yaml --bench bench.yaml --harness harness.yaml
+```
+
+Three more commands use the same files and settings:
+
+| Command | What it does |
+| --- | --- |
+| `benchtare selftest` | The self-test alone: the bench check and the harness check |
+| `benchtare check-tests` | The test check: proves each test can fail at every check |
+| `benchtare check-hygiene` | The hygiene check: proves each test stands on its own |
 
 ## Documents
 
