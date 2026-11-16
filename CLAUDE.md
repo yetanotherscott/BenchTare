@@ -20,6 +20,10 @@ of the slice is the acceptance check, by hand. M10 (requirements and the trace
 report) is optional: start it only when asked. Finish and commit one milestone
 before starting the next.
 
+On the `plugins` branch, work follows `docs/plugin-plan.md` instead, one step
+at a time. At each step's check-in, confirm its decisions with the user before
+writing code. The plan is a draft and will change.
+
 The plan has an "Out of scope for this slice" list. Do not build anything on
 it, even if the design brief describes it. If a task seems to need something
 out of scope, stop and ask.
