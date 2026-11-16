@@ -464,16 +464,42 @@ closing equipment, receive threads. pytest's own options set its verbosity:
 - **A frame that doesn't match the DBC is skipped**, and the bus keeps
   receiving. One bad frame never stops the bench from reading the rest.
 
-## Proving the results can be trusted
+## What BenchTare verifies
 
-BenchTare checks three things: the bench, the harness and the tests.
+A test's pass or fail is only worth something if everything under it works.
+BenchTare verifies five areas, each a different question with its own check:
 
-### The self-test (before every session)
+| | Area | The question | Verified by | When |
+| --- | --- | --- | --- | --- |
+| 1 | **Bench** | Is every equipment item working? | The bench check (self-test) | Before every session |
+| 2 | **Harness** | Is everything wired as the harness file says, and is the DUT there? | The harness check (self-test) | Before every session |
+| 3 | **Test hygiene** | Do setup and teardown leave the DUT in a known state, so each test stands on its own? | The hygiene check (M7) | On demand |
+| 4 | **Test logic** | Can every check in each test fail? | The test check | On demand |
+| 5 | **The DUT** | Does the DUT do what its requirements say? | The team's tests | Every run |
 
-The self-test runs once the tests are collected, before the first one. If it
-fails, the session stops, no tests run, and the output says what failed and
-what to check. This catches a disconnected cable, a missing DUT, or a DUT that
-never booted, before those turn into confusing test failures.
+- **Each area is verified on its own,** by its own check, with its own verdict,
+  its own report and its own stored results. A check fails only for its own
+  area: the harness check never fails because of broken equipment, and the test
+  check never fails because a test doesn't repeat.
+- **They build on each other, in that order.** A failure in a lower area makes
+  the areas above it "not checked, because of" that area, never a verdict of
+  their own. A failed bench check leaves the harness checks on that equipment
+  not checked, and no test runs; a test that doesn't repeat gets no test-logic
+  verdict.
+- **The DUT is the area of interest; the other four are there so that its
+  results can be trusted.** When this session's bench and harness checks
+  passed, and each test's hygiene and logic have been checked and its file
+  hasn't changed since, a pass or a fail reflects the DUT, not the setup around
+  it. A usual run says which of these is missing.
+
+### Bench and harness: the self-test (before every session)
+
+The self-test runs once the tests are collected, before the first one. It is
+two checks with two verdicts: the bench check, then the harness check. If
+either fails, the session stops, no tests run, and the output says which check
+failed, what failed in it and what to check. This catches a disconnected cable,
+a missing DUT, or a DUT that never booted, before those turn into confusing
+test failures.
 
 | Check | Passes when |
 | --- | --- |
@@ -483,21 +509,23 @@ never booted, before those turn into confusing test failures.
 | Harness: each presence check on a bus | Any frame arrives on the bus within its `within:` seconds |
 | Harness: each presence check on a signal | Any value of the signal arrives within its `within:` seconds |
 
-A harness check on equipment that failed the bench check is skipped, because it
-couldn't tell anything new.
+A harness check on equipment that failed the bench check is not checked rather
+than failed: a broken item says nothing about the wiring.
 
 - **Only when the bench is needed.** The self-test runs, and the bench opens,
   only if a collected test uses the `bench` fixture. Tests that only use
   `signals` can still run without the equipment. `--collect-only` runs neither.
-- **What it shows.** A passing self-test shows one line before the first test;
-  `-v` lists every check. A failing one lists every check, with what to check
-  for each failure, and the run stops with exit code 2 (pytest's "interrupted"):
+- **What it shows.** A passing self-test shows two lines before the first test,
+  one per check; `-v` lists every check. A failing one lists every check of
+  both, with what to check for each failure, and the run stops with exit code 2
+  (pytest's "interrupted"):
 
 ```
-=================== BenchTare self-test failed in 1.01 s ===================
+========================= BenchTare bench check passed =========================
 PASSED  equipment can0: sim_can, healthy
 PASSED  equipment io: sim, healthy
 PASSED  simulated DUT reference: running
+======================== BenchTare harness check failed ========================
 FAILED  loopback io.out4 -> io.in4: drove True on io.out4, but io.in4 didn't read it back within 1 s; it read nothing
         Check: the loopback wire from io.out4 to io.in4 (harness file harness-can.yaml)
 PASSED  DUT traffic on can0: frames received
@@ -516,7 +544,23 @@ from the ini file. Other options go to pytest. It lists every check, and exits
 stored, and 4 when it couldn't start (BenchTare isn't configured, or a file is
 wrong).
 
-### The test check (on demand)
+### Test hygiene: the hygiene check (planned, M7)
+
+A test stands on its own when its staging puts the DUT into a known state and
+its teardown leaves nothing behind. The hygiene check will verify that, for any
+DUT, from the writes and readings BenchTare sees:
+
+- **It repeats:** the test passes when run twice in a row.
+- **It leaves nothing behind:** every input it wrote is restored by teardown,
+  and the DUT's outputs after teardown match those before setup.
+- **Its staging sets a meaningful starting point:** the DUT isn't already in
+  the state the test expects before the test's stimulus, so the test can tell
+  whether the DUT responded.
+
+Until then, the test check notices a test that doesn't repeat, and reports its
+logic as not checked, because of test hygiene.
+
+### Test logic: the test check (on demand)
 
 A test that passes whatever the DUT does proves nothing, and neither does a
 test that fails at its first check but would pass whatever its later checks
@@ -534,8 +578,7 @@ something.
 passed runs again:
 
 1. **The control,** with nothing corrupted. It must pass and take the same
-   readings in the same order. A test that doesn't repeat is reported as
-   inconclusive, because nothing the check found about it could be trusted.
+   readings in the same order.
 2. **One rerun per reading and mode,** with only that reading corrupted. Every
    earlier step reads real values, so the test gets as far as the corrupted
    step, and the check sees whether that step's check catches it.
@@ -546,13 +589,15 @@ always read the real values, so the DUT is put into the same state each time.
 **Every failure counted is a real failure.** A rerun's failure counts as proof
 only when it is the corrupted reading's doing: it happened at that step, or
 after it ("failed later, at test_x.py:14, after reading 3"), and the reading
-really was changed. Anything else proves nothing about the test's checks, and
-is reported as inconclusive with the reason:
+really was changed.
 
-- the test failed before reaching the corrupted step, which the control passed;
-- it failed with nothing corrupted, so it may be flaky;
-- nothing arrived (a `ReadTimeout` fails every test, good or bad);
-- staging failed on the rerun, or the rerun took different readings.
+**A test that doesn't repeat isn't judged.** If the control fails or takes
+other readings, staging fails on a rerun, or a rerun fails before its
+corrupted step or with nothing corrupted, the test doesn't repeat: that is a
+test hygiene problem, and none of its reruns can be trusted. Its logic is
+"not checked, because of test hygiene", with what happened, and the walk stops
+there. A rerun that ends because nothing arrived (a `ReadTimeout` fails every
+test, good or bad) is inconclusive.
 
 **Verdicts.** A reading can fail if some mode makes the test fail there. A
 test:
@@ -563,21 +608,18 @@ test:
   check accepts a clearly wrong value.
 - **can't fail** if any reading can't: "UNABLE TO FAIL at 1 of 3 readings",
   with the step's line. The run's exit code is 1, even though every test
-  passed.
-- **is inconclusive** if the control failed, or a reading's reruns proved
-  nothing.
-- **isn't checked** if it didn't pass to begin with, doesn't use the bench, or
-  takes no checked reading in its body.
+  passed. This is the only verdict that fails the test check, since it is the
+  only one about test logic.
+- **is inconclusive** if a reading's reruns proved nothing.
+- **isn't checked** if it didn't pass to begin with, doesn't use the bench,
+  takes no checked reading in its body, or doesn't repeat (test hygiene).
 
 **When a mode can't change a reading,** it is "not applied", with why: a value
 that can't be shifted, no value before a write, or, for `stale`, the value
 before the write being the same as what arrived ("it was already 42.0 degC
-before the write, so a DUT that ignored the write would look the same at this
-step"). That last one is worth reading when the write was meant to change that
-signal: the staging leaves the DUT where the test expects it, so the test
-can't tell whether the DUT responded. Reruns follow each other, so this shows
-up whenever staging doesn't set a starting point that differs from what the
-test asks for.
+before the write, so stale can't change this step"). When the write was meant
+to change that signal, the staging left the DUT where the test expects it: a
+hygiene question, which the hygiene check will ask.
 
 The report lists only what needs attention; `-v` shows every step, the control
 and where each rerun failed.
@@ -594,6 +636,13 @@ Ranges are not needed here, and BenchTare doesn't know them. Boundary values
 writes from the requirement; the test check then proves each one can fail.
 Ranges from protocol standards, and helpers that generate boundary values, are
 on the roadmap (design brief, later stages 7 and 13).
+
+### The DUT: the team's tests
+
+This is the area of interest. Tests are plain pytest, run as usual, and their
+results are stored. A usual run's summary says which of the four areas
+beneath it are covered: the self-test of this session, and which test files
+have never had their logic checked, or have changed since.
 
 ## Results and the manifest
 

@@ -13,10 +13,15 @@ hardware or simulation, and proves that its own results are reliable.
 - You describe your device (an interface description, which can import DBC
   files), your bench equipment, and the harness that connects them. You write
   plain pytest tests against named signals.
-- Before each run, the bench and harness check themselves: equipment healthy,
-  loopbacks reading back, DUT present. If not, the run doesn't start.
-- On demand, BenchTare proves each test can fail at every check, by corrupting what it
-  reads, one reading at a time.
+- It verifies everything under the DUT, each area on its own, so a pass or a
+  fail reflects the device and not the setup:
+  - before each run, the bench and the harness check themselves: equipment
+    healthy, loopbacks reading back, DUT present. If not, the run doesn't
+    start;
+  - on demand, it proves each test can fail at every check, by corrupting what
+    it reads, one reading at a time;
+  - on demand (planned), it proves each test stands on its own: it repeats,
+    leaves nothing behind and starts from a meaningful state.
 - The same tests run on a simulated bench or on real hardware.
 - Every run is recorded in a database with a manifest of what was tested.
 - Requirements are optional. When you have them, tests trace to them.

@@ -1,8 +1,8 @@
 # Results schema
 
 **Status: version 2 is built (M6).** Version 1 (M5) is the schema below;
-version 2 adds the test check (see "Version 2" below), and M8 will add
-version 3. A new database is created at version 1 and brought up through the
+version 2 adds the test check (see "Version 2" below). M7 will add version 3
+(test hygiene) and M9 version 4 (requirements). A new database is created at version 1 and brought up through the
 same migrations as an old one, so every database ends up the same. Changing it
 means a new version and a migration, never a silent change.
 
@@ -12,7 +12,8 @@ means a new version and a migration, never a silent change.
 | --- | --- |
 | M5 | Each run, its manifest, each test's outcome, duration and test record, and the self-test result |
 | M6 | Each test check, per test and mode, and when each test file was last checked (version 2) |
-| M8 | The requirement IDs each test result covers |
+| M7 | Each test's hygiene check: whether it repeats, leaves nothing behind and starts from a meaningful state (version 3) |
+| M9 | The requirement IDs each test result covers |
 | Later: analysis (stage 6) | Pass rates and durations over time, and trends in measured values, so readings must be queryable, not only stored as text |
 | Later: remote database (stage 6) | Runs written locally can be copied to a shared database without ID clashes, so IDs are global and the SQL is plain |
 | Later: GUI (stage 10) | Browse runs, results and records without parsing BenchTare's own files |
@@ -334,7 +335,9 @@ covers both.
 
 ## Later versions (designed now, built in their milestones)
 
-- **Version 3, M8** — `test_requirements`: `run_id`, `test_seq`,
+- **Version 3, M7** — the hygiene check's results per test; designed at the
+  start of M7.
+- **Version 4, M9** — `test_requirements`: `run_id`, `test_seq`,
   `requirement_id`.
 
 ## Versions and migrations

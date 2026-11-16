@@ -16,7 +16,7 @@ Read these before making design decisions:
 ## Current scope
 
 Work through the milestones in `docs/first-slice-plan.md` in order (M0 is done;
-M1 to M7, then optional M8). Finish and commit one milestone before starting
+M1 to M8, then optional M9). Finish and commit one milestone before starting
 the next.
 
 The plan has an "Out of scope for this slice" list. Do not build anything on
@@ -62,12 +62,14 @@ Use these names consistently in code, docs and messages.
 | Transport | How a backend reaches the DUT: CAN now, others later as plugins |
 | Staging | Putting the DUT into the state a test needs, using ordinary pytest fixtures |
 | Self-test | The bench check and harness check that run before each session |
-| Test check | The on-demand run that corrupts readings to prove each test can fail |
+| Hygiene check | The on-demand run that proves each test stands on its own: it repeats, leaves nothing behind, and starts from a meaningful state (M7) |
+| Test check | The on-demand run that corrupts readings, one at a time, to prove each test can fail at every check |
 | Reference | The simulated DUT, bench and harness that ship with the package |
 | Test record | What happened at the bench during a test, kept with its result: readings, comparisons and outcomes, then stimuli, then frames |
 | Manifest | The record of what a run tested: versions and file hashes |
 | DUT identity | The DUT's hardware revision and software versions, recorded per run. The interface description lists the expected items by name, never their values |
-| Trace report | The report linking requirements, tests and results (M8) |
+| Trace report | The report linking requirements, tests and results (M9) |
+| Verification areas | Bench, harness, test hygiene, test logic and the DUT: what BenchTare verifies, each on its own, in that order |
 
 ## Conventions
 
@@ -123,3 +125,10 @@ Do not reopen these without being asked:
   are regular dependencies, not extras.
 - Run history goes to a database: local by default, remote by configuration.
   SQLite is assumed as the local default.
+- BenchTare verifies five areas, each on its own and in this order: the bench,
+  the harness, test hygiene, test logic, and the DUT. The DUT is the area of
+  interest; the other four are there so its results reflect physical reality.
+  Each has its own check, verdict, report and stored results, and fails only
+  for its own area. A lower area's failure makes the areas above it "not
+  checked, because of" it, never a verdict of their own. See "What BenchTare
+  verifies" in `docs/model.md`.

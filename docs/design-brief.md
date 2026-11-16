@@ -29,13 +29,16 @@ Status: second draft.
 1. **Complete out of the box.** A team installs the tool, describes its bench,
    and runs tests. Tests address named signals with units. Which bench channel
    carries each signal is declared in a harness file, not coded.
-2. **Proves its own reliability.** Before each run, a self-test checks the
-   bench equipment and the harness that connects it to the DUT. A run manifest
+2. **Proves its own reliability.** A test's pass or fail is worth something
+   only if everything under it works, so BenchTare verifies four areas beneath
+   the DUT, each on its own: the bench equipment and the harness (a self-test
+   before each run), test hygiene (each test repeats, leaves nothing behind and
+   starts from a meaningful state) and test logic (a test check corrupts what
+   tests read, one reading at a time, to show that each can fail at every
+   verification step). Then a pass or a fail reflects the DUT. A run manifest
    records the framework version and the DUT, bench, harness and test files. A
-   test check corrupts what tests read, one reading at a time, to show that
-   each test can fail at every verification step. A simulated reference DUT,
-   bench and harness ship with the project and verify every framework change,
-   like unit tests for the framework itself.
+   simulated reference DUT, bench and harness ship with the project and verify
+   every framework change, like unit tests for the framework itself.
 3. **Agnostic to target and hardware.** It works with any embedded target,
    whatever its software architecture. Transports are plugins: CAN, serial,
    sockets, MQTT, DAQ I/O or anything else. Backends are defined by capability,
@@ -140,14 +143,16 @@ finish in a few weeks.
 5. Record the run in a local database with a stable schema, with a manifest of
    the framework version and hashes of the DUT, bench, harness and test files.
 6. Run the test check, which corrupts what the test reads and confirms that
-   the test can fail.
-7. Optional: import requirements from a Doorstop tree, tag the test with a
+   the test can fail at every check.
+7. Run the hygiene check, which confirms that the test repeats, leaves nothing
+   behind and starts from a meaningful state.
+8. Optional: import requirements from a Doorstop tree, tag the test with a
    requirement ID, and get a trace report.
 
 **Acceptance check:** a person who knows pytest and has never seen the tool
 installs it, runs the scaffold command on the example project, and has a
-passing test in under 15 minutes. The test check then shows that the test can
-fail.
+passing test in under 15 minutes. The hygiene check then passes, and the test
+check shows that the test can fail.
 
 See [first-slice-plan.md](first-slice-plan.md) for the build order.
 

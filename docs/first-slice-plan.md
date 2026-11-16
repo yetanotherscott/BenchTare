@@ -81,7 +81,7 @@ benchtare/
 │   │   └── store.py         # ResultStore protocol and SQLite implementation
 │   ├── scaffold/
 │   │   └── quickstart/      # what `benchtare init` writes
-│   ├── requirements/        # optional, milestone M8
+│   ├── requirements/        # optional, milestone M9
 │   ├── record.py            # the test record: levels, entries
 │   ├── plugin.py            # pytest plugin: options, fixtures, hooks
 │   └── cli.py               # init, selftest, check-tests, report
@@ -129,7 +129,7 @@ implementations without changing them.
 - **`ResultStore`** (`results/store.py`): `start_run`, then `add_environment`,
   `add_manifest_files`, `add_equipment`, `add_selftest`, `add_test`,
   `add_record` and `add_identity` as the run goes, and `finish_run`. SQLite is
-  the only implementation in this slice. M8 adds requirement IDs.
+  the only implementation in this slice. M9 adds requirement IDs.
 - **`Backend.identity()`**: the equipment's vendor, model, serial number,
   firmware and driver, as far as the backend can tell.
 
@@ -344,7 +344,39 @@ bench gained a fifth input, `io.in5`, so the IO harness carries it too.
   in tests, and ranges from standards plus boundary-value helpers are later
   stages 7 and 13.
 
-### M7: Scaffold and acceptance
+### M7: Test hygiene
+
+The fourth of the areas BenchTare verifies (see "What BenchTare verifies" in
+`docs/model.md`): that each test stands on its own. It is checked on its own,
+with its own verdicts, report and stored results, separately from the bench
+and harness (M4) and from test logic (M6).
+
+- `pytest --check-hygiene` and `benchtare check-hygiene` run the tests, then
+  check each one that passed:
+  - **It repeats:** it passes when run again straight after itself, and takes
+    the same readings in the same order.
+  - **It leaves nothing behind:** once its teardown ends, every DUT input it
+    wrote is back at its value from before setup.
+  - **Its staging sets a meaningful starting point:** at each checked reading,
+    the value from before the test's most recent write differs from what the
+    test accepted, so the test can tell whether the DUT responded.
+- The test check keeps its control rerun, which it needs to trust its own
+  reruns, and keeps reporting a test that doesn't repeat as "not checked,
+  because of test hygiene". The hygiene check is where hygiene fails a run.
+- A usual run's closing line covers hygiene as well as test logic: which test
+  files were never hygiene-checked, or changed since.
+- Results schema version 3: the hygiene check's results per test.
+- Tests: a clean test passes; a test that doesn't repeat, one that leaves an
+  input written, and one whose DUT was already in the state it expects are
+  each caught, with what to fix.
+- To settle at the start of M7: whether DUT outputs are compared before setup
+  and after teardown too, given outputs such as counters or measured values
+  that change on their own; and how the hygiene check and the test check share
+  reruns, so a run of both doesn't repeat work.
+- Later, not in M7: running the tests in another order, to find a test that
+  depends on what ran before it.
+
+### M8: Scaffold and acceptance
 
 - `benchtare init <dir>` writes the packaged quickstart: an interface
   description, a bench file, a harness file, a `conftest.py` with a staging
@@ -354,15 +386,16 @@ bench gained a fifth input, `io.in5`, so the IO harness carries it too.
   1. build the wheel;
   2. install it in a fresh virtual environment;
   3. run `benchtare init demo`, `cd demo`, `pytest`, which must pass;
-  4. run `benchtare check-tests`, which must report the test as able to fail.
+  4. run `benchtare check-hygiene`, which must pass;
+  5. run `benchtare check-tests`, which must report the test as able to fail.
 - **Acceptance check:** on a clean machine, `pip install benchtare`,
   `benchtare init demo`, `cd demo`, `pytest` gives a passing test in under 15
-  minutes, for someone who knows pytest and has never seen the tool. The test
-  check then shows that the test can fail.
+  minutes, for someone who knows pytest and has never seen the tool. The
+  hygiene check then passes, and the test check shows that the test can fail.
 
-### M8 (optional): Requirements and trace report
+### M9 (optional): Requirements and trace report
 
-Only after M7 passes.
+Only after M8 passes.
 
 - First decide how to read Doorstop trees. Either read its YAML item files
   directly with PyYAML, or depend on `doorstop`, which is LGPLv3 and brings
@@ -392,9 +425,9 @@ Do not build these yet, even where the design brief describes them:
 - Trend analysis and dashboards.
 - A GUI (design brief, later stage 10).
 - IDE setup for test development, such as editor schemas for the YAML files or
-  run configurations (design brief, later stage 9). `benchtare init` (M7)
+  run configurations (design brief, later stage 9). `benchtare init` (M8)
   writes the quickstart project only.
-- A full user guide with worked examples (design brief, later stage 12). M7
+- A full user guide with worked examples (design brief, later stage 12). M8
   writes the README quickstart only; recommended practices found along the way
   go on the brief's list of guide topics.
 - Platform-specific hardware support and setup guides (design brief, later
