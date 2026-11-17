@@ -1,7 +1,8 @@
 # Results schema
 
-**Status: version 3 is built (M7).** Version 1 (M5) is the schema below;
-version 2 adds the test check and version 3 the hygiene check (see below).
+**Status: version 4 is built (plugin plan, step 2).** Version 1 (M5) is the
+schema below; version 2 adds the test check, version 3 the hygiene check and
+version 4 the plugins each run used (see below).
 Later changes, such as M10's requirements, take the next version when they
 are built. A new database is created at version 1 and brought up through the
 same migrations as an old one, so every database ends up the same. Changing it
@@ -14,6 +15,7 @@ means a new version and a migration, never a silent change.
 | M5 | Each run, its manifest, each test's outcome, duration and test record, and the self-test result |
 | M6 | Each test check, per test and mode, and when each test file was last checked (version 2) |
 | M7 | Each test's hygiene check: each rule's result, and each clean-state item compared, with its values before and after (version 3) |
+| Plugin plan | Each plugin a run used: its UUID, name, plugin API version, and the package it came from (version 4) |
 | M10 | The requirement IDs each test result covers |
 | Later: analysis (stage 6) | Pass rates and durations over time, and trends in measured values, so readings must be queryable, not only stored as text |
 | Later: remote database (stage 6) | Runs written locally can be copied to a shared database without ID clashes, so IDs are global and the SQL is plain |
@@ -135,7 +137,7 @@ and leaves the hardware columns empty.
 | --- | --- | --- |
 | `run_id` | TEXT, not null | |
 | `equipment` | TEXT, not null | Its name in the bench file, such as `can0` |
-| `backend` | TEXT, not null | Such as `sim_can` or, later, `socketcan` |
+| `backend` | TEXT, not null | Its name, such as `sim_can` or, later, `socketcan`, even when the bench file named it by UUID. From version 4, `run_plugins` says where it came from |
 | `kind` | TEXT, not null | `channels` or `bus` |
 | `simulated` | INTEGER, not null | 1 for simulated equipment |
 | `vendor` | TEXT | Such as the adapter's maker |
@@ -371,6 +373,30 @@ Migration 2 to 3 adds:
 - **The repeat run's record** goes into `record_entries` with the phases
   `repeat setup`, `repeat call` and `repeat teardown`.
 
+## Version 4 (plugin plan, step 2): plugins
+
+Migration 3 to 4 adds:
+
+- **`run_plugins`**: one row per plugin the run used: for now, each backend
+  the bench's equipment uses, BenchTare's own included. A backend used by two
+  equipment items has one row.
+
+  | Column | Type | Notes |
+  | --- | --- | --- |
+  | `run_id` | TEXT, not null | |
+  | `uuid` | TEXT, not null | The UUID it declares, in lower case |
+  | `name` | TEXT, not null | Its name, as in `run_equipment.backend` |
+  | `kind` | TEXT, not null | `backend`; later also `transport` |
+  | `api_version` | INTEGER, not null | The plugin API version it was written for |
+  | `distribution` | TEXT | The package it came from, such as `benchtare`; null when not known |
+  | `distribution_version` | TEXT | That package's version |
+
+  Primary key: `run_id, uuid`.
+
+Runs stored before version 4 get no rows. Their backends are in
+`run_equipment`, but where those came from wasn't recorded, so the migration
+doesn't guess.
+
 ## Later changes (designed now, numbered when built)
 
 A planned change takes the next schema version when it is built, so the
@@ -386,8 +412,8 @@ numbers follow the order changes land in, not the order they were planned.
   step by step, inside one transaction. A failed migration leaves the original
   untouched.
 - **A newer file** (written by a newer BenchTare) is refused, and nothing is
-  written: "results database .benchtare/results.sqlite3 is schema version 4,
-  written by a newer BenchTare; this BenchTare (0.0.1) reads up to version 3,
+  written: "results database .benchtare/results.sqlite3 is schema version 5,
+  written by a newer BenchTare; this BenchTare (0.1.0) reads up to version 4,
   so it won't write to it", with what to check: upgrade BenchTare, point
   `--results` at another file, or run with `--no-results`.
 - **A file that isn't a BenchTare database**, or is corrupt, is refused with a

@@ -651,8 +651,12 @@ class BenchSession:
             bench.open()
             self.bench = bench
             equipment = bench.equipment() if self.store is not None else []
+            plugins = [plugin.record() for plugin in self.bench_config.plugins()]
             self._store(
                 "the bench equipment", lambda store, run: store.add_equipment(run, equipment)
+            )
+            self._store(
+                "the backends the bench uses", lambda store, run: store.add_plugins(run, plugins)
             )
             for name, value in self._identify:
                 bench.collect_identity(name, value, COMMAND_LINE)

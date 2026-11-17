@@ -38,7 +38,6 @@ from types import MappingProxyType
 from typing import Any
 
 from benchtare._yaml import YAML_VALUE_WORDS, count, kind_of, read_mapping
-from benchtare.backends import BACKENDS
 from benchtare.bench.config import BenchConfig, EquipmentConfig
 from benchtare.dut.description import InterfaceDescription
 from benchtare.errors import ConfigError, Problem
@@ -643,5 +642,5 @@ def _where_in(exc: BaseException, source: Path) -> str:
 
 def _carries_fd(equipment: EquipmentConfig) -> bool:
     """Whether a bus is set up for CAN FD frames. Backends without the notion carry none."""
-    carries_fd = getattr(BACKENDS[equipment.backend], "carries_fd", None)
+    carries_fd = getattr(equipment.backend_type, "carries_fd", None)
     return bool(carries_fd(equipment.options)) if carries_fd is not None else False

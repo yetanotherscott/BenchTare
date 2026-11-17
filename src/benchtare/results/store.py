@@ -95,6 +95,8 @@ class ResultStore(Protocol):
 
     def add_equipment(self, run_id: str, equipment: Sequence[Mapping[str, Any]]) -> None: ...
 
+    def add_plugins(self, run_id: str, plugins: Sequence[Mapping[str, Any]]) -> None: ...
+
     def add_selftest(self, run_id: str, result: SelfTestResult) -> None: ...
 
     def add_test(self, run_id: str, result: TestResult) -> None: ...
@@ -280,6 +282,26 @@ class SQLiteStore:
                         _json(item["details"]) if item.get("details") else None,
                     )
                     for item in equipment
+                ],
+            )
+
+    def add_plugins(self, run_id: str, plugins: Sequence[Mapping[str, Any]]) -> None:
+        with self._write():
+            self.db.executemany(
+                """INSERT OR REPLACE INTO run_plugins (run_id, uuid, name, kind, api_version,
+                    distribution, distribution_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        run_id,
+                        plugin["uuid"],
+                        plugin["name"],
+                        plugin["kind"],
+                        plugin["api_version"],
+                        plugin.get("distribution"),
+                        plugin.get("distribution_version"),
+                    )
+                    for plugin in plugins
                 ],
             )
 

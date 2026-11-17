@@ -38,7 +38,6 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from benchtare.backends import BACKENDS
 from benchtare.backends.base import (
     Backend,
     BenchError,
@@ -124,7 +123,7 @@ class Bench:
         self._buffer = ReceiveBuffer()
         self._bindings = _bindings(description, harness)
         self._backends: dict[str, Backend] = {
-            item.id: BACKENDS[item.backend](item.id, item.options, item.channels)
+            item.id: item.backend_type(item.id, item.options, item.channels)
             for item in bench.equipment.values()
         }
         self.simulation: Simulation | None = None

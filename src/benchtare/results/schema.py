@@ -25,7 +25,7 @@ from pathlib import Path
 from benchtare import __version__
 from benchtare.errors import BenchTareError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Version 1. Each later version adds a migration below instead of changing these.
 TABLES_V1 = (
@@ -222,10 +222,28 @@ def _v2_to_v3(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE manifest_files ADD COLUMN unchanged_since_hygiene INTEGER")
 
 
+def _v3_to_v4(db: sqlite3.Connection) -> None:
+    """Version 4 (plugin plan, step 2), plugins: each backend a run used, with its UUID, name,
+    plugin API version and the distribution it came from. Runs stored before version 4 have no
+    rows: which backends they used is in run_equipment, but not where those came from."""
+    db.execute(
+        """CREATE TABLE run_plugins (
+            run_id TEXT NOT NULL REFERENCES runs (id),
+            uuid TEXT NOT NULL,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            api_version INTEGER NOT NULL,
+            distribution TEXT,
+            distribution_version TEXT,
+            PRIMARY KEY (run_id, uuid)
+        )"""
+    )
+
+
 # MIGRATIONS[n] upgrades a database from version n to version n + 1. A new database is created
 # at version 1 and brought up through the same steps, so every database ends up the same.
 Migration = Callable[[sqlite3.Connection], None]
-MIGRATIONS: dict[int, Migration] = {1: _v1_to_v2, 2: _v2_to_v3}
+MIGRATIONS: dict[int, Migration] = {1: _v1_to_v2, 2: _v2_to_v3, 3: _v3_to_v4}
 
 BUSY_TIMEOUT_MS = 5000  # how long to wait for another run's write before giving up
 _RETRY_PAUSE = 0.02  # seconds between tries when SQLite answers "busy" without waiting

@@ -1,8 +1,8 @@
 # BenchTare Plugin Plan
 
-**Status: draft, subject to change. Step 0, the plan as a whole, and step 1,
-the definitions, are confirmed (16 Nov 2026); step 2 is next.** This plan is worked through one step
-at a time. Each step ends at a **check-in**, where the decisions it depends on
+**Status: draft, subject to change. Steps 0 to 2 are confirmed (16 Nov 2026):
+the plan as a whole, the definitions, and the plugin API, identity and
+discovery.** This plan is worked through one step at a time. Each step ends at a **check-in**, where the decisions it depends on
 are confirmed before any code is written. The first design matters: it can
 change later, but changes get painful once anyone has adopted it.
 
@@ -95,6 +95,38 @@ brief:
     transport through the public plugin API. Identity and discovery are step
     2's.
 
+Confirmed at step 2:
+
+22. **The API module is `benchtare.api`, at API version 1.** Each plugin
+    declares the version it targets, and BenchTare refuses a plugin built for a
+    version it doesn't support, saying what to upgrade. The API may change
+    freely until the first merge into `main`; after that, a breaking change
+    bumps its version.
+23. **The API holds the backend side only, for now:** the backend interfaces
+    and the types they use (bindings, channel capabilities, equipment identity,
+    the receiver), the errors a backend raises, and record entries for
+    unexpected events. The transport side is added at step 6, which also moves
+    the CAN details that bindings carry today into the CAN transport.
+24. **UUIDs are a class attribute,** `uuid`, beside `name`, `kind` and
+    `simulated`: one per backend or transport, not one per distribution.
+    Entry points can't carry one: they only map a name to an object.
+25. **Names.** The name a bench file uses is the entry point's name, and it
+    must match the class's `name`. A bench file can also name a backend by its
+    UUID, which is only needed to settle a clash between two names.
+26. **Discovery** is through the entry-point group `benchtare.backends`
+    (`benchtare.transports` at step 6). `sim` and `sim_can` are registered in
+    BenchTare's own `pyproject.toml`, so they are found the same way. Built-in
+    backends may still use BenchTare's internals; only separate distributions
+    are held to the API-only rule, from step 7.
+27. **Errors.** Name and UUID clashes are reported as "Plugin identity" below
+    says. A bench file naming a backend that isn't installed is told which
+    package provides it, for the example plugins.
+28. **Results schema version 4** adds `run_plugins`: one row per plugin a run
+    used, with its UUID, name, kind, API version, distribution and
+    distribution version. Older runs get no rows; the migration doesn't guess.
+    Step 3's labels take version 5, so each step that changes the schema gets
+    its own version and no database changes silently.
+
 ## Working definitions
 
 Two of these were confirmed at step 1, and [model.md](model.md) is now their
@@ -157,8 +189,8 @@ results schema, so it needs a version bump and a migration.
 - Each run records every plugin it used: UUID, name, version and distribution.
   That is another results schema change.
 
-Open: where the UUID is declared (a class attribute, or entry-point metadata),
-and whether a bench file can name a plugin by UUID directly.
+Decided at step 2: the UUID is a class attribute, and a bench file can name a
+backend by its UUID (decisions 24 and 25).
 
 ### The plugin API
 
@@ -169,12 +201,13 @@ and whether a bench file can name a plugin by UUID directly.
 - Built-in backends (`sim`, `sim_can`) are found through the same discovery as
   plugins.
 
-Open: exactly what the API contains.
+Decided at step 2: `benchtare.api`, holding the backend side for now
+(decisions 22 and 23).
 
 ### Discovery
 
-Entry-point groups, one per kind of plugin: `benchtare.backends` and
-`benchtare.transports` to start with (names proposed). A bench file that names
+Entry-point groups, one per kind of plugin: `benchtare.backends`, and
+`benchtare.transports` from step 6 (decision 26). A bench file that names
 a plugin that isn't installed gets an error saying which package provides it,
 when that is known.
 
@@ -241,7 +274,7 @@ Each step ends with tests passing, a commit on the branch, and a check-in.
 | --- | --- | --- |
 | 0 | This plan (confirmed) | The plan as a whole |
 | 1 | The definitions in `model.md`, `CLAUDE.md` and the design brief: backend and transport; verified, attested and asserted; how the core's current checks are labelled (done) | The definitions |
-| 2 | Plugin API, identity and discovery: the versioned API module, UUIDs, entry points, the built-in backends found the same way, and each run recording its plugins (a results schema change, with a new version and a migration) | The API surface, where UUIDs live, the schema change |
+| 2 | Plugin API, identity and discovery: the versioned API module, UUIDs, entry points, the built-in backends found the same way, and each run recording its plugins (a results schema change, with a new version and a migration) (done) | The API surface, where UUIDs live, the schema change |
 | 3 | Verified and asserted in the core: self-test results and records labelled, with the bench check's asserted health kept apart from its verified checks | The wording, the schema change |
 | 4 | The conformance kit for backends, run against `sim` and `sim_can` | The rule list |
 | 5 | Grading, first version: `benchtare grade`, with each tier's rules drawn from the kit and the plugin's metadata | The tiers and their rules |

@@ -44,6 +44,8 @@ _NO_LEVEL = object()
 
 class SimIO:
     name: ClassVar[str] = "sim"
+    uuid: ClassVar[str] = "12feeba6-1032-4c47-b17d-81ec67f3cb40"
+    api_version: ClassVar[int] = 1
     kind: ClassVar[EquipmentKind] = "channels"
     simulated: ClassVar[bool] = True
 

@@ -57,6 +57,11 @@ dev = ["pytest>=7.4", "ruff"]
 [project.entry-points.pytest11]
 benchtare = "benchtare.plugin"
 
+# BenchTare's own backends, found exactly as a plugin's are. See benchtare.discovery.
+[project.entry-points."benchtare.backends"]
+sim = "benchtare.backends.sim:SimIO"
+sim_can = "benchtare.backends.sim_can:SimCan"
+
 [project.scripts]
 benchtare = "benchtare.cli:main"
 

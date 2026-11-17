@@ -67,6 +67,8 @@ _OPTIONS = ("bus", "fd")
 
 class SimCan:
     name: ClassVar[str] = "sim_can"
+    uuid: ClassVar[str] = "f88fbff0-95d9-4f39-8bf4-ceed3980f041"
+    api_version: ClassVar[int] = 1
     kind: ClassVar[EquipmentKind] = "bus"
     simulated: ClassVar[bool] = True
 

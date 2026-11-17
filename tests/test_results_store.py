@@ -35,8 +35,17 @@ TABLES = {
     "test_checks",  # version 2
     "hygiene_checks",  # version 3
     "hygiene_items",
+    "run_plugins",  # version 4
 }
 NEXT = SCHEMA_VERSION + 1  # a stand-in for the next version, to test upgrading in general
+SIM_PLUGIN = {
+    "uuid": "12feeba6-1032-4c47-b17d-81ec67f3cb40",
+    "name": "sim",
+    "kind": "backend",
+    "api_version": 1,
+    "distribution": "benchtare",
+    "distribution_version": "0.0.2",
+}
 
 
 def run_info(run_id="run-1", **changes):
@@ -79,9 +88,9 @@ def tables(db):
 def test_a_new_database_is_created_at_the_current_version(path):
     db = open_database(path)
     assert tables(db) == TABLES
-    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
     meta = dict(db.execute("SELECT key, value FROM meta"))
-    assert meta["schema_version"] == "3"
+    assert meta["schema_version"] == "4"
     assert meta["created_by"].startswith("benchtare ")
     db.close()
 
@@ -161,6 +170,7 @@ def store_a_whole_run(store, run_id, *, finish=True):
             }
         ],
     )
+    store.add_plugins(run_id, [SIM_PLUGIN])
     check = CheckResult("loopback", "loopback io.out4 -> io.in4", "passed", "read back True")
     store.add_selftest(run_id, SelfTestResult((check,), now, 0.2))
     write = {"signal": "io.out4", "value": True}
@@ -215,6 +225,21 @@ def test_later_runs_add_rows_and_leave_every_earlier_row_as_it_was(path, databas
             assert not added
         else:  # the run's ID is the first column of every other table
             assert {row[0] for row in added} == {"run-2", "run-3"}, table
+
+
+def test_each_plugin_a_run_used_is_stored_once(store):
+    store.start_run(run_info())
+    unknown = {**SIM_PLUGIN, "uuid": "0b1c5d7e-0000-4000-8000-000000000001", "name": "lab_daq"}
+    del unknown["distribution"], unknown["distribution_version"]  # not known
+    store.add_plugins("run-1", [SIM_PLUGIN, unknown])
+    rows = store.db.execute(
+        "SELECT uuid, name, kind, api_version, distribution, distribution_version "
+        "FROM run_plugins ORDER BY name"
+    ).fetchall()
+    assert rows == [
+        ("0b1c5d7e-0000-4000-8000-000000000001", "lab_daq", "backend", 1, None, None),
+        ("12feeba6-1032-4c47-b17d-81ec67f3cb40", "sim", "backend", 1, "benchtare", "0.0.2"),
+    ]
 
 
 def test_a_run_id_already_stored_is_refused_not_overwritten(store):
@@ -462,8 +487,10 @@ def test_a_version_1_database_is_upgraded_to_the_current_version_keeping_its_run
     assert "test_checks" not in tables(before)
     before.close()
     store = SQLiteStore(path)
-    assert schema.schema_version(store.db) == 3
-    assert {"test_checks", "hygiene_checks", "hygiene_items"} <= tables(store.db)
+    assert schema.schema_version(store.db) == 4
+    assert {"test_checks", "hygiene_checks", "hygiene_items", "run_plugins"} <= tables(store.db)
+    # The old run used backends, but nothing says where they came from: no rows are made up.
+    assert store.db.execute("SELECT count(*) FROM run_plugins").fetchall() == [(0,)]
     assert store.db.execute(
         "SELECT nodeid, outcome, check_verdict, hygiene_verdict FROM test_results"
     ).fetchall() == [("t.py::a", "passed", None, None)]

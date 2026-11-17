@@ -169,9 +169,38 @@ reused for any DUT.
   equipment is the bus, and the harness file which signals go on it. CAN with
   DBC is the only transport so far.
 - **A plugin** is a separately installable package that adds a backend or a
-  transport through BenchTare's public plugin API. How plugins are identified
-  and found is being designed in the [plugin plan](plugin-plan.md). Today's
-  backends are built in.
+  transport through BenchTare's public plugin API, the `benchtare.api` module.
+  How plugins are graded and tested is being designed in the
+  [plugin plan](plugin-plan.md).
+
+**How backends are found.** Every backend, BenchTare's own included, is
+registered in the `benchtare.backends` entry-point group under the name a bench
+file uses, so installing a plugin package is all it takes to use its backends.
+Each backend also declares a UUID, which never changes, and the plugin API
+version it was written for. A bench file names a backend by its name, or by its
+UUID when two installed packages provide the same name:
+
+```yaml
+equipment:
+  daq1:
+    backend: 6a0f3c1e-8d2b-4e57-9b1a-3c4d5e6f7a80   # by UUID, to settle a clash
+```
+
+A backend named in a bench file is refused, with what to do, when:
+
+- it isn't installed (for a known plugin, the message says which package to
+  install);
+- two installed packages provide its name (the message lists both, with their
+  UUIDs);
+- two installed backends declare the same UUID (one was almost certainly
+  copied from the other);
+- it can't be loaded, its class's name doesn't match its entry point, or it
+  declares no valid UUID;
+- it was written for a plugin API version this BenchTare doesn't support (the
+  message says whether to upgrade BenchTare or the plugin).
+
+A broken plugin that no bench file names stops nothing; it is only logged.
+Each run records the plugins it used: see "Results and the manifest" below.
 
 BenchTare has two backends so far, both simulated, one of each kind. Hardware
 backends come later behind the same interface.
@@ -767,6 +796,8 @@ Each run stores:
   file, the harness file, each test file, each `conftest.py` and the ini file;
 - the bench equipment, as each backend describes it: vendor, model, serial
   number, firmware and driver, as far as it can tell;
+- each plugin the run used, BenchTare's own backends included: its UUID, name,
+  plugin API version, and the package and version it came from;
 - the DUT's identity (see "Identity" above);
 - the machine and software it ran on: host, OS, Python build and every
   installed package.

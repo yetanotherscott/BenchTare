@@ -148,9 +148,17 @@ class BusBackend(Backend, Protocol):
 
 
 class BackendType(Protocol):
-    """The class of a backend, as named by ``backend:`` in a bench file."""
+    """The class of a backend, as named by ``backend:`` in a bench file.
+
+    ``name`` is the name a bench file uses, and must match the backend's entry point in the
+    ``benchtare.backends`` group. ``uuid`` identifies the backend: generated once by its author
+    and never changed. ``api_version`` is the plugin API version it was written for
+    (``benchtare.api.API_VERSION``).
+    """
 
     name: ClassVar[str]
+    uuid: ClassVar[str]
+    api_version: ClassVar[int]
     kind: ClassVar[EquipmentKind]
     simulated: ClassVar[bool]
 

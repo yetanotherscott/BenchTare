@@ -10,8 +10,26 @@ something you rely on bumps y, and any other release bumps z.
 
 ## [Unreleased]
 
+### Added
+
+- `benchtare.api`, the plugin API: everything a backend plugin may import, at
+  plugin API version 1. It is provisional until the release that first
+  includes it.
+- Backends are found through the `benchtare.backends` entry points, so an
+  installed plugin package's backends can be named in a bench file.
+  BenchTare's own `sim` and `sim_can` are found the same way.
+- Each backend declares a UUID and the plugin API version it was written for.
+  A bench file can name a backend by its UUID, to settle two packages
+  providing the same name. Clashing names, copied UUIDs, broken plugins and
+  unsupported API versions are refused with what to do.
+- Results schema version 4: each run records the plugins it used, with their
+  UUIDs and the packages they came from. Older databases are upgraded, and
+  their runs get no plugin rows.
+
 ### Changed
 
+- Backends are no longer a fixed list inside BenchTare. A source checkout must
+  be installed (`pip install -e .`) for its own backends to be found.
 - The documentation gives "transport" one meaning: the encoding between a
   DUT's signals and what a bus carries, such as DBC frames on CAN. CAN
   interfaces, serial ports and other equipment are reached through backends.

@@ -6,7 +6,7 @@ import textwrap
 
 import pytest
 
-from benchtare import reference
+from benchtare import __version__, reference
 from benchtare.results import schema
 from benchtare.results.schema import write_failed
 from benchtare.results.store import SQLiteStore
@@ -214,6 +214,35 @@ def test_the_equipment_is_stored(project):
         ("can0", "sim_can", "bus", 1, "python-can virtual bus"),
         ("io", "sim", "channels", 1, "benchtare sim"),
     ]
+
+
+def test_the_backends_a_run_used_are_stored_as_plugins(project):
+    project.runpytest(*CLI)
+    rows = query(
+        project,
+        "SELECT uuid, name, kind, api_version, distribution, distribution_version "
+        "FROM run_plugins ORDER BY name",
+    )
+    assert rows == [
+        ("12feeba6-1032-4c47-b17d-81ec67f3cb40", "sim", "backend", 1, "benchtare", __version__),
+        ("f88fbff0-95d9-4f39-8bf4-ceed3980f041", "sim_can", "backend", 1, "benchtare", __version__),
+    ]
+
+
+def test_a_failure_storing_the_plugins_stops_the_run(project, monkeypatch):
+    monkeypatch.setattr(SQLiteStore, "add_plugins", disk_full)
+    result = project.runpytest(*CLI)
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    result.stdout.fnmatch_lines(
+        [
+            "*= BenchTare couldn't store results, so the run stopped =*",
+            (
+                "Storing the backends the bench uses failed: results database *results.sqlite3 "
+                "couldn't be written: database or disk is full"
+            ),
+        ]
+    )
+    result.stdout.no_fnmatch_line("*self-test passed*")
 
 
 # --- the self-test and the test record --------------------------------------------------------------
