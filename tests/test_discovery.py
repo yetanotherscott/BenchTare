@@ -120,6 +120,17 @@ def test_a_backend_can_be_named_by_its_uuid(tmp_path):
     assert bench.equipment["io"].backend == "sim"  # results and messages keep the name
 
 
+def test_a_bench_lists_each_backend_it_uses_once_in_its_order(tmp_path):
+    path = tmp_path / "bench.yaml"
+    path.write_text(
+        "bench: b\nequipment:\n"
+        "  io1: {backend: sim, channels: {in1: {read: true}}}\n"
+        "  can0: {backend: sim_can}\n"
+        "  io2: {backend: sim, channels: {in1: {read: true}}}\n"
+    )
+    assert [plugin.name for plugin in load_bench_file(path).plugins()] == ["sim", "sim_can"]
+
+
 def test_a_uuid_no_backend_has_is_reported(tmp_path):
     message = problems(tmp_path, OTHER_UUID)
     assert f"no installed backend has the UUID {OTHER_UUID}" in message

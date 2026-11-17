@@ -97,7 +97,7 @@ def installed_backends() -> tuple[Plugin, ...]:
     Read once per process. Tests that install a backend call ``installed_backends.cache_clear()``.
     """
     entry_points = importlib.metadata.entry_points(group=BACKEND_GROUP)
-    found = tuple(_load(entry_point) for entry_point in sorted(entry_points, key=_order))
+    found = tuple(_load(entry_point) for entry_point in entry_points)
     for plugin in found:
         if plugin.problem is None:
             log.debug("found backend %s (%s, UUID %s)", plugin.name, plugin.source, plugin.uuid)
@@ -128,8 +128,6 @@ def find_backend(reference: str) -> Plugin:
                 f"no installed backend has the UUID {wanted}",
                 hint=f"check the UUID, or install the package that provides it; {_listing()}",
             )
-        if len(matches) > 1:
-            raise _copied(matches[0], matches[1])
     else:
         matches = [plugin for plugin in plugins if plugin.name == reference]
         if not matches:
@@ -149,10 +147,6 @@ def find_backend(reference: str) -> Plugin:
     if twin is not None:
         raise _copied(chosen, twin)
     return chosen
-
-
-def _order(entry_point: importlib.metadata.EntryPoint) -> tuple[str, str]:
-    return (entry_point.name, entry_point.value)
 
 
 def _load(entry_point: importlib.metadata.EntryPoint) -> Plugin:
