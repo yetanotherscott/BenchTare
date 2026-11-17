@@ -83,6 +83,11 @@ Use these names consistently in code, docs and messages.
   plugin itself.
 - Every new behaviour gets a test. For the self-test and results code, also
   add a test that proves a failure is detected, not only that success passes.
+- A test failure is never ignored, rerun until it passes, or put down to a slow
+  runner without finding its cause. A test that fails only sometimes depends on
+  timing or order: fix it so its outcome doesn't, and show the fix by
+  reproducing the failure first. Check CI on every branch pushed, `main`
+  included, and report a failure as soon as it is found.
 - Keep dependencies minimal. Add each one in the milestone that first needs
   it, and record why in the commit message.
 - The results schema carries a version number. Any change to it needs a
