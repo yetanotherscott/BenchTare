@@ -55,8 +55,11 @@ def test_without_staging_the_dut_answers_zero(bench):
     signals = bench.signals
     bench.wait_until(signals.Mode, "standby", timeout=2.0)
     bench.write(signals.Setpoint, 42.0)
-    with pytest.raises(ComparisonFailed):
-        bench.wait_until(signals.Measured, 42.0, timeout=0.3)
+    # A value after the write, however long a slow runner takes to deliver it: on CAN the DUT's
+    # answer, on I/O the sampled channel.
+    assert bench.wait_until(signals.Measured, 0.0, timeout=2.0) == 0.0
+    with pytest.raises(ComparisonFailed):  # and nothing since has been 42
+        bench.wait_until(signals.Measured, 42.0, timeout=0.2)
 
 
 def test_supply_ok_follows_supply_enable(bench):
@@ -146,6 +149,9 @@ def test_values_that_never_match_fail_like_an_assert_with_the_last_value(can_ben
         str(info.value),
     )
     can_bench.write(signals.ModeRequest, "standby")
+    # A heartbeat after the write has arrived, so the wait below fails on what arrived, never on
+    # how quickly: a slow runner can't turn it into a read timeout.
+    can_bench.wait_until(signals.Mode, "standby", timeout=2.0)
     with pytest.raises(ComparisonFailed, match="arrived after the last write, the last 'standby'"):
         can_bench.wait_until(signals.Mode, "run", timeout=0.2)
 
@@ -194,8 +200,16 @@ def test_undefined_enum_code_can_be_sent_as_a_raw_number(can_bench):
     signals = can_bench.signals
     can_bench.wait_until(signals.Mode, "standby", timeout=2.0)
     can_bench.write(signals.ModeRequest, 3)  # not a defined value: the DUT should ignore it
-    with pytest.raises(ComparisonFailed):
-        can_bench.wait_until(signals.Mode, "run", timeout=0.2)
+    # Its next five heartbeats all say standby. Counting heartbeats, not seconds, keeps this
+    # true on a runner too slow to deliver any within a short wait.
+    heartbeats = []
+
+    def fifth(mode):
+        heartbeats.append(mode)
+        return len(heartbeats) == 5
+
+    can_bench.wait_until(signals.Mode, fifth, timeout=2.0)
+    assert heartbeats == ["standby"] * 5
 
 
 def test_unknown_enum_name_lists_the_values(bench):

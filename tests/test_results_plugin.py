@@ -36,6 +36,7 @@ def test_tracks(running, bench, signals):
 
 def test_misses(running, bench, signals):
     bench.write(signals.Setpoint, 42.0)
+    bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=2.0)
     bench.wait_until(signals.Measured, pytest.approx(99.0, abs=0.5), timeout=0.3)
 """
 
@@ -258,7 +259,7 @@ def test_readings_can_be_queried_across_runs(project):
         "SELECT value_num, unit FROM record_entries "
         "WHERE signal = 'Measured' AND kind = 'wait_until' ORDER BY at",
     )
-    assert len(readings) == 4  # two tests, two runs
+    assert len(readings) == 6  # three waits (one in test_tracks, two in test_misses), two runs
     assert (42.0, "degC") in readings
 
 

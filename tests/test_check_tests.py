@@ -353,7 +353,7 @@ def test_a_rerun_where_nothing_arrives_proves_nothing(project):
             if len(RUNS) > 2:
                 bench.simulation.cut("io.in1")  # Measured stops arriving
             bench.write(signals.Setpoint, 42.0)
-            bench.read(signals.Measured, timeout=0.3)
+            bench.read(signals.Measured, timeout=1.0)
         """
     )
     result = project.runpytest(*CLI, "--check-tests")
