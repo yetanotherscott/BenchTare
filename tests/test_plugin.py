@@ -169,6 +169,7 @@ def test_failed_check_is_a_failure_with_a_clean_message(project):
 
         def test_setpoint_is_tracked(running, bench, signals):
             bench.write(signals.Setpoint, 42.0)
+            bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=2.0)
             bench.wait_until(signals.Measured, pytest.approx(99.0, abs=0.5), timeout=0.3)
         """
     )
@@ -431,11 +432,14 @@ def test_bench_is_closed_when_the_run_ends(project):
 
 # --- the test record -----------------------------------------------------------------------------
 
+# The answer arrives before the wait that fails, so that wait fails on what arrived, never on how
+# quickly: a slow runner can't turn it into a read timeout.
 FAILING_TEST = """
 import pytest
 
 def test_setpoint_is_tracked(running, bench, signals):
     bench.write(signals.Setpoint, 42.0)
+    bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.5), timeout=2.0)
     bench.wait_until(signals.Measured, pytest.approx(99.0, abs=0.5), timeout=0.3)
 """
 
@@ -505,7 +509,7 @@ def test_a_failed_test_shows_its_record(project):
                 "??:??:??.??? wait_until Measured, expecting 99.0 ± *: not reached within 0.3 s on "
                 "io.in1; * arrived, the last 42.0 degC"
             ),
-            "??:??:??.??? call failed: *Measured did not reach 99.0*",
+            "??:??:??.??? call failed: *ComparisonFailed: Measured did not reach 99.0*",
         ]
     )
     # BenchTare's own log is separate, and isn't turned up for the test record.

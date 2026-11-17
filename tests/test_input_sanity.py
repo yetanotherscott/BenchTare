@@ -57,11 +57,16 @@ def test_reference_device_ignores_inputs_it_cannot_use():
             ("NoSuchSignal", 1),
         ]:
             device.set_input(name, value)
-        time.sleep(0.15)
+        # Still heartbeating: two more heartbeats after the inputs, counted rather than slept
+        # for, so a slow runner can't make this fail.
+        wanted = published.count(("Mode", "standby")) + 2
+        deadline = time.monotonic() + 2.0
+        while published.count(("Mode", "standby")) < wanted and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert published.count(("Mode", "standby")) >= wanted
         assert device.running
         assert device.errors == []
         assert ("supply_ok", True) not in published
-        assert published.count(("Mode", "standby")) >= 2  # still heartbeating
     finally:
         device.stop()
 

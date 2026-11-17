@@ -233,6 +233,9 @@ def test_stale_gives_the_test_the_value_from_before_the_write(bench):
     signals = bench.signals
     bench.wait_until(signals.Measured, 0.0, timeout=2.0)
     bench.write(signals.Setpoint, 42.0)
+    # Let the DUT's answer arrive first, so the corrupted wait below has it to corrupt however
+    # slow the runner is.
+    bench.wait_until(signals.Measured, pytest.approx(42.0, abs=0.05), timeout=2.0)
     bench.readings = []
     bench.corruption = STALE
     # The DUT moves to 42, but the test sees what it reported before the write.

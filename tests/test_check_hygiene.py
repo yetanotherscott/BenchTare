@@ -32,6 +32,7 @@ def clean(bench, signals):
     bench.read(signals.Mode, timeout=2.0)
     bench.write(signals.supply_enable, False)
     bench.write(signals.Setpoint, 0.0)
+    bench.wait_until(signals.Measured, 0.0, timeout=2.0)  # its answer, however slow
     bench.write(signals.ModeRequest, "standby")
     bench.wait_until(signals.Mode, "standby", timeout=1.0)
 
@@ -42,6 +43,7 @@ def running(clean, bench, signals):
     bench.wait_until(signals.Mode, "run", timeout=1.0)
     yield
     bench.write(signals.Setpoint, 0.0)
+    bench.wait_until(signals.Measured, 0.0, timeout=2.0)  # settled, so the next test starts clean
     bench.write(signals.ModeRequest, "standby")
     bench.wait_until(signals.Mode, "standby", timeout=1.0)
 
