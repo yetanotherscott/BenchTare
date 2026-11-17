@@ -484,8 +484,8 @@ Only after M9 passes.
 Do not build these yet, even where the design brief describes them:
 
 - Real hardware backends and DAQ devices.
-- Transports other than virtual CAN: serial, sockets, MQTT and SSH (design
-  brief, later stages 2 and 3). M7's state probes are hooks the team writes, reached
+- Backends and transports other than virtual CAN with DBC: serial, sockets,
+  MQTT and SSH (design brief, later stages 2 and 3). M7's state probes are hooks the team writes, reached
   however it likes.
 - Protocols above raw CAN signals (CANopen, Modbus, UDS, J1939, ISOBUS),
   including any `standards:` value in an interface description.

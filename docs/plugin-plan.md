@@ -1,7 +1,7 @@
 # BenchTare Plugin Plan
 
-**Status: draft, subject to change. Step 0, the plan as a whole, is
-confirmed (16 Nov 2026); step 1 is next.** This plan is worked through one step
+**Status: draft, subject to change. Step 0, the plan as a whole, and step 1,
+the definitions, are confirmed (16 Nov 2026); step 2 is next.** This plan is worked through one step
 at a time. Each step ends at a **check-in**, where the decisions it depends on
 are confirmed before any code is written. The first design matters: it can
 change later, but changes get painful once anyone has adopted it.
@@ -28,8 +28,8 @@ a term, it says so.
 
 ## Decided
 
-1. **Backend and transport** get a working definition now (see below). It is
-   expected to evolve as the examples are built.
+1. **Backend and transport** get a working definition (see below; confirmed at
+   step 1). It is expected to evolve as the examples are built.
 2. **Every claim a plugin makes is either verified or asserted,** and plugins
    are treated like the rest of the stack: verifiable as far as possible, with
    what can only be asserted labelled as such.
@@ -70,13 +70,42 @@ Confirmed at step 0:
 15. **The design brief's later stages follow this plan.** Its stage 2 is this
     work.
 
-## Working definitions (proposed)
+Confirmed at step 1, and written into `model.md`, `CLAUDE.md` and the design
+brief:
 
-### Backend and transport
+16. **Backend and transport.** A backend drives one kind of equipment: it
+    opens, closes, checks itself, describes itself and moves values on
+    channels. A transport is the encoding between a DUT's signals and what a
+    bus carries. The old meaning, "CAN and serial are transports", is retired:
+    those are equipment, reached through backends.
+17. **Two kinds of backend.** A channels backend carries plain values on named
+    channels and needs no transport. A bus backend carries many signals through
+    one transport. Today's `sim` and `sim_can` are one of each.
+18. **The encoding belongs to the DUT.** Each transport has its own section of
+    the interface description, as `can:` has today, and the bench file says
+    which equipment is the bus. The exact shape is settled at step 6.
+19. **SSH's shape waits for step 9:** one backend or more, and whether file
+    access goes through commands.
+20. **Verified, attested and asserted,** as defined below, and today's results
+    labelled as `model.md`'s table shows: opening an item, the simulated DUT,
+    loopbacks, presence, the manifest, hygiene, the test check and test
+    results are verified; an item's health and identity, and the DUT's
+    identity, are asserted; nothing is attested yet. Step 3 stores the labels.
+21. **Plugin:** a separately installable package that adds a backend or a
+    transport through the public plugin API. Identity and discovery are step
+    2's.
+
+## Working definitions
+
+Two of these were confirmed at step 1, and [model.md](model.md) is now their
+reference: backend and transport, and verified, attested and asserted. The rest
+are proposed, for the steps that need them.
+
+### Backend and transport (confirmed at step 1)
 
 - **Backend:** code that drives one kind of equipment: a CAN adapter, a serial
-  port, an SSH connection, a QEMU machine. It opens, closes, checks itself and
-  moves values.
+  port, an SSH connection, a QEMU machine. It opens, closes, checks itself,
+  describes itself and moves values.
 - **Transport** (new meaning): the encoding between signals and what a bus
   carries: DBC frames on CAN, text commands on a serial line, commands and files
   over SSH.
@@ -92,10 +121,11 @@ Confirmed at step 0:
 | A network connection to the DUT | SSH | Commands and files |
 | The QEMU machine itself | QEMU (channels: power) | None |
 
-Open: does a transport own its own section of the interface description, as
-`can:` does today? Is SSH one backend with one transport, or more than one?
+A transport owns its own section of the interface description, as `can:`
+does today (decision 18); its exact shape is settled at step 6. Open until step
+9: is SSH one backend with one transport, or more than one?
 
-### Verified, attested and asserted
+### Verified, attested and asserted (confirmed at step 1)
 
 Every result, record entry and plugin claim is one of:
 
@@ -111,7 +141,8 @@ Every result, record entry and plugin claim is one of:
 
 This applies to the core too. Today's bench check passes when each backend's
 `check()` says it is healthy, which is asserted; the harness check's loopbacks
-are verified. Results don't yet say which is which. Labelling them changes the
+are verified. Results don't yet say which is which. `model.md` sets out how
+each of today's results would be labelled. Storing the labels changes the
 results schema, so it needs a version bump and a migration.
 
 ### Plugin identity
@@ -209,7 +240,7 @@ Each step ends with tests passing, a commit on the branch, and a check-in.
 | Step | What it delivers | Check-in confirms |
 | --- | --- | --- |
 | 0 | This plan (confirmed) | The plan as a whole |
-| 1 | The definitions in `model.md`, `CLAUDE.md` and the design brief: backend and transport; verified, attested and asserted; how the core's current checks are labelled | The definitions |
+| 1 | The definitions in `model.md`, `CLAUDE.md` and the design brief: backend and transport; verified, attested and asserted; how the core's current checks are labelled (done) | The definitions |
 | 2 | Plugin API, identity and discovery: the versioned API module, UUIDs, entry points, the built-in backends found the same way, and each run recording its plugins (a results schema change, with a new version and a migration) | The API surface, where UUIDs live, the schema change |
 | 3 | Verified and asserted in the core: self-test results and records labelled, with the bench check's asserted health kept apart from its verified checks | The wording, the schema change |
 | 4 | The conformance kit for backends, run against `sim` and `sim_can` | The rule list |

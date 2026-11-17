@@ -148,8 +148,33 @@ equipment:
 A bench file describes equipment only. It names no DUT signals, so it can be
 reused for any DUT.
 
-The first slice has two backends, both simulated. Hardware backends come later
-behind the same interface.
+### Backends and transports
+
+- **A backend** is the code that drives one kind of equipment: a CAN interface,
+  a DAQ, a serial port, an SSH connection, a QEMU machine. It opens and closes
+  the equipment, checks itself, describes itself (vendor, model, serial number
+  and so on), and moves values on its channels.
+- **A transport** is the encoding between a DUT's signals and what a bus
+  carries: DBC frames on CAN now, and later, for example, a line protocol on a
+  serial port or commands over SSH. CAN, serial and SSH are not transports
+  themselves: they are equipment, reached through backends. The transport is
+  what the frames, lines or commands mean.
+- **There are two kinds of backend.** A **channels** backend carries plain
+  values on named channels and needs no transport: `sim`, a DAQ, a QEMU
+  machine's power. A **bus** backend carries many signals on one channel, the
+  bus, through a transport: `sim_can`, and later SocketCAN.
+- **The encoding belongs to the DUT.** Which frame or command carries a signal
+  is part of the DUT's design, so each transport has its own section of the
+  interface description, as `can:` has today. The bench file says which
+  equipment is the bus, and the harness file which signals go on it. CAN with
+  DBC is the only transport so far.
+- **A plugin** is a separately installable package that adds a backend or a
+  transport through BenchTare's public plugin API. How plugins are identified
+  and found is being designed in the [plugin plan](plugin-plan.md). Today's
+  backends are built in.
+
+BenchTare has two backends so far, both simulated, one of each kind. Hardware
+backends come later behind the same interface.
 
 - **`sim`** is simulated I/O with named channels. Its read channels are sampled
   continuously, like a DAQ: every 10 ms by default, or `sample_period:` seconds.
@@ -493,6 +518,37 @@ BenchTare verifies five areas, each a different question with its own check:
   passed, and each test's hygiene and logic have been checked and its file
   hasn't changed since, a pass or a fail reflects the DUT, not the setup around
   it. A usual run says which of these is missing.
+
+### Verified, attested and asserted
+
+Not every part of a check is proof. Every result, record entry and plugin
+claim is one of three things:
+
+- **Verified:** BenchTare proved it itself. A loopback read back what was
+  driven; a frame arrived from the DUT.
+- **Attested:** a person carried out a recorded procedure, because only a
+  person can, such as pulling a real cable to show its failure is reported. The
+  record says what was done, by whom and when.
+- **Asserted:** the equipment, a plugin, the DUT or the team says so, and
+  BenchTare can only record it: a serial number, "healthy", a software version.
+
+Results don't carry these labels yet. Adding them changes the results schema,
+so it comes with a new schema version and a migration. Until then, this is how
+today's results would be labelled:
+
+| Result | Label |
+| --- | --- |
+| An equipment item opened | Verified |
+| An equipment item is healthy | Asserted, by its backend's `check()` |
+| An equipment item's identity: vendor, model, serial number, firmware, driver | Asserted, by its backend |
+| The simulated DUT is running, and the errors in its own actions | Verified |
+| Loopbacks and presence checks | Verified |
+| The DUT's identity | Asserted: by the DUT when read from one of its signals, by the team through `--identify` or `bench.identify()` |
+| The manifest's versions and file hashes | Verified |
+| Hygiene check, test check and test results | Verified |
+
+Nothing is attested yet. A DUT identity BenchTare works out for itself, such as
+the hash of an image it loads onto the DUT, would be verified.
 
 ### Bench and harness: the self-test (before every session)
 

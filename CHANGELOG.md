@@ -10,6 +10,14 @@ something you rely on bumps y, and any other release bumps z.
 
 ## [Unreleased]
 
+### Changed
+
+- The documentation gives "transport" one meaning: the encoding between a
+  DUT's signals and what a bus carries, such as DBC frames on CAN. CAN
+  interfaces, serial ports and other equipment are reached through backends.
+  It also defines verified, attested and asserted, ahead of results carrying
+  those labels.
+
 ## [0.0.2] - 2026-11-16
 
 ### Added

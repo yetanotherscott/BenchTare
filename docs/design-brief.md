@@ -41,9 +41,12 @@ proposals.
    simulated reference DUT, bench and harness ship with the project and verify
    every framework change, like unit tests for the framework itself.
 3. **Agnostic to target and hardware.** It works with any embedded target,
-   whatever its software architecture. Transports are plugins: CAN, serial,
-   sockets, MQTT, DAQ I/O or anything else. Backends are defined by capability,
-   and the same test runs in simulation or on hardware.
+   whatever its software architecture. Equipment and encodings are plugins: a
+   backend drives one kind of equipment (a CAN interface, a serial port, a
+   network connection, a DAQ or anything else), and a transport is the
+   encoding between signals and a bus (DBC frames on CAN, and others later).
+   Backends are defined by capability, and the same test runs in simulation or
+   on hardware.
 4. **Zero to testing with no framework knowledge.** Tests are plain pytest. One
    command scaffolds a project, and the first test passes on a laptop with no
    hardware attached.
@@ -117,7 +120,7 @@ IDs, so the only code the team writes is the tests.
 Before each run the bench and harness check themselves: the equipment reports
 healthy, loopbacks read back what was driven, and the DUT is present.
 Switching the bench and harness files moves the same tests between simulation
-and hardware, over whichever transport plugin the bench uses. Every run ends
+and hardware, whichever backends drive the equipment. Every run ends
 in a results record with a manifest of the framework version and the DUT,
 bench, harness and test files.
 
@@ -170,7 +173,7 @@ order of the rest is a proposal.
 | Stage | Area | Adds |
 | --- | --- | --- |
 | 2 | Plugins | A versioned plugin API, with plugins identified by UUID and found by discovery; every claim a plugin makes labelled verified, attested or asserted; a conformance kit, and grading from bronze to platinum on verifiability; CAN with DBC as the first transport. Then example plugins built only on the public API, as an outside team would: SocketCAN on a virtual bus, a QEMU machine backend for an embedded Linux example DUT built with Yocto, serial, and SSH, whose state probes give test hygiene real operating-system state; and a plugin template and guide |
-| 3 | Hardware and more transports | First hardware: SocketCAN on a real adapter, plus two dissimilar low-cost DAQ devices, to prove the capability interface. The test check on real equipment needs an explicit opt-in, since a corrupted reading can lead a test to send a stimulus it normally wouldn't. The hygiene check is run on a real DUT, as acceptance. TCP/UDP sockets and MQTT as plugins, on stage 2's interfaces |
+| 3 | Hardware and more transports | First hardware: SocketCAN on a real adapter, plus two dissimilar low-cost DAQ devices, to prove the capability interface. The test check on real equipment needs an explicit opt-in, since a corrupted reading can lead a test to send a stimulus it normally wouldn't. The hygiene check is run on a real DUT, as acceptance. TCP/UDP sockets and MQTT as plugins, each a backend with its transport, on stage 2's interfaces |
 | 4 | Self-verification | Standard interface fault stimuli, such as dropped or stopped CAN messages; the shipped reference extended to cover each new backend and transport. For test hygiene: a more realistic simulated reference (measurement noise, settling ramps, a fault that latches until a supply cycle, a free-running counter, state only a probe can read), beyond stage 2's example DUT, running tests in other orders, and active disruption on DUT models. For the test check: replaying recorded readings, for signals that need it |
 | 5 | Requirements | ReqIF, StrictDoc and Sphinx-Needs importers, feeding the trace report M10 builds from Doorstop |
 | 6 | Analysis | Remote database option; trends for pass rate, duration and measured values |
@@ -257,8 +260,11 @@ not from hands-on evaluation.
 - The license is MIT, for the widest adoption. Sharing improvements back is
   encouraged, not required.
 - The working name is BenchTare, installable as `benchtare`.
-- Transports are plugins, and the framework does not care which one a bench
-  uses.
+- Backends and transports are plugins, and the framework does not care which
+  ones a bench uses. A backend drives equipment; a transport is an encoding,
+  such as DBC frames on CAN ([model.md](model.md), "Backends and transports").
+- Every result and plugin claim is verified, attested or asserted
+  ([model.md](model.md), "Verified, attested and asserted").
 - The reference bench is simulated and ships with the project.
 - Run history goes to a database, local by default and remote by
   configuration. The local database is SQLite.

@@ -69,8 +69,10 @@ Use these names consistently in code, docs and messages.
 | Bench file | YAML listing the bench's equipment, with each item's backend and channels |
 | Harness | What connects the bench to the DUT |
 | Harness file | YAML mapping each signal to a bench channel, with loopback and DUT presence checks |
-| Backend | Code that drives one kind of equipment: simulated now, hardware later |
-| Transport | How a backend reaches the DUT: CAN now, others later as plugins |
+| Backend | Code that drives one kind of equipment (a CAN interface, a DAQ, a serial port): opens, closes, checks and describes it, and moves values on its channels. A channels backend carries plain values; a bus backend carries many signals through a transport. Simulated now, hardware later |
+| Transport | The encoding between a DUT's signals and what a bus carries: DBC frames on CAN now, others later as plugins. It belongs to the DUT, in the interface description. CAN, serial and SSH are equipment, reached through backends, not transports |
+| Plugin | A separately installable package that adds a backend or a transport through the public plugin API |
+| Verified, attested, asserted | What each result and claim rests on: BenchTare proved it; a person carried out a recorded procedure; or the equipment, a plugin, the DUT or the team says so, and BenchTare only records it |
 | Staging | Putting the DUT into the state a test needs, using ordinary pytest fixtures |
 | Self-test | The bench check and harness check that run before each session |
 | Hygiene check | The on-demand run that proves each test stands on its own: it repeats, leaves nothing behind, and starts from a meaningful state (M7) |
@@ -143,7 +145,12 @@ Do not reopen these without being asked:
 - License: MIT.
 - Requirements traceability is optional and secondary. The core value is a
   complete bench that proves its own reliability.
-- Transports and backends are plugins behind stable interfaces.
+- Backends and transports are plugins behind stable interfaces. A backend
+  drives equipment; a transport is an encoding, such as DBC frames on CAN. See
+  "Backends and transports" in `docs/model.md`.
+- Every result and claim is verified, attested or asserted, and is to be
+  labelled as such; results don't carry the labels yet. See "Verified, attested
+  and asserted" in `docs/model.md`.
 - The reference DUT, bench and harness are simulated and ship inside the
   package.
 - One install: python-can (LGPL-3.0, an unmodified dependency) and cantools
