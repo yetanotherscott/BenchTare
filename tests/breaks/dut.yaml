@@ -1,0 +1,123 @@
+# Breaks for the reference DUT and DUT models: how a simulated DUT behaves, and how a model
+# runs. Each break takes one behaviour away; every test it names must then fail. See
+# docs/testing.md.
+
+# --- the reference DUT -------------------------------------------------------------------------
+
+- id: reference-answers-a-setpoint-in-standby
+  guards: The reference DUT answers a setpoint with 0.0 until it is in run
+  file: src/benchtare/reference/device.py
+  find: '        self.publish("Measured", float(setpoint) if self.mode == "run" else 0.0)'
+  replace: '        self.publish("Measured", float(setpoint))'
+  caught_by:
+    - tests/test_bench_runtime.py::test_without_staging_the_dut_answers_zero
+
+- id: reference-takes-any-mode-request
+  guards: The reference DUT ignores a mode request that isn't one of its modes
+  file: src/benchtare/reference/device.py
+  find: '        elif name == "ModeRequest" and isinstance(value, str) and value in self.MODES:'
+  replace: '        elif name == "ModeRequest":'
+  caught_by:
+    - tests/test_input_sanity.py::test_reference_device_ignores_inputs_it_cannot_use
+    - tests/test_bench_runtime.py::test_undefined_enum_code_can_be_sent_as_a_raw_number
+
+- id: reference-answers-a-setpoint-that-isnt-a-number
+  guards: The reference DUT ignores a setpoint that isn't a finite number, as a real DUT would
+  file: src/benchtare/reference/device.py
+  find: '        if name == "Setpoint" and _is_number(value):'
+  replace: '        if name == "Setpoint":'
+  caught_by:
+    - tests/test_input_sanity.py::test_reference_device_ignores_inputs_it_cannot_use
+
+- id: reference-supply-ok-stuck
+  guards: The reference DUT's supply_ok follows supply_enable
+  file: src/benchtare/reference/device.py
+  find: |2
+                    self.supply_ok = bool(value)
+                    self.publish("supply_ok", self.supply_ok)
+  replace: |2
+                    pass
+  caught_by:
+    - tests/test_bench_runtime.py::test_supply_ok_follows_supply_enable
+
+# --- a DUT model -------------------------------------------------------------------------------
+
+- id: model-error-stops-it
+  guards: An error in a model's action is recorded, and the model keeps running
+  file: src/benchtare/sim/model.py
+  find: '                self.errors.append(f"{type(exc).__name__}: {exc}")'
+  replace: "                raise"
+  caught_by:
+    - tests/test_dut_models.py::test_an_error_in_a_model_is_recorded_and_it_keeps_running
+    - tests/test_input_sanity.py::test_failing_device_action_is_reported_and_the_device_keeps_running
+
+- id: after-runs-at-once
+  guards: after() runs an action after its delay, not at once
+  file: src/benchtare/sim/model.py
+  find: "            due = time.monotonic() + max(0.0, delay)"
+  replace: "            due = time.monotonic()"
+  caught_by:
+    - tests/test_dut_models.py::test_after_runs_an_action_later
+
+- id: every-runs-once
+  guards: every() repeats an action
+  file: src/benchtare/sim/model.py
+  find: |2
+                finally:
+                    self.after(period, repeat)
+  replace: |2
+                finally:
+                    pass
+  caught_by:
+    - tests/test_dut_models.py::test_every_repeats_an_action
+
+- id: model-options-ignored
+  guards: A model that takes no options refuses any it is given
+  file: src/benchtare/sim/model.py
+  find: |2
+            if options:
+                raise TypeError(
+  replace: |2
+            if False:
+                raise TypeError(
+  caught_by:
+    - tests/test_dut_models.py::test_a_model_without_options_refuses_them
+
+- id: stopped-model-keeps-running
+  guards: Stopping a model stops its thread
+  file: src/benchtare/sim/model.py
+  find: |2
+                self._running = False
+                self._wake.notify_all()
+            if self._thread is not None:
+  replace: |2
+                self._wake.notify_all()
+            if self._thread is not None:
+  caught_by:
+    - tests/test_dut_models.py::test_stopping_a_model_stops_its_thread
+
+# --- the simulation ----------------------------------------------------------------------------
+
+- id: model-publishing-a-non-output-unreported
+  guards: A model that publishes something that isn't a DUT output fails the bench check
+  file: src/benchtare/sim/simulation.py
+  find: "            if signal is None or signal.direction is not Direction.OUTPUT:"
+  replace: "            if False:"
+  caught_by:
+    - tests/test_dut_models.py::test_a_model_that_publishes_something_that_isnt_an_output_fails_the_bench_check
+
+- id: model-errors-not-reported
+  guards: Errors in the simulated DUT are reported by its check
+  file: src/benchtare/sim/simulation.py
+  find: '        problems = [f"{dut}: {e}" for e in self.device.errors]'
+  replace: "        problems = []"
+  caught_by:
+    - tests/test_input_sanity.py::test_failing_device_action_is_reported_and_the_device_keeps_running
+
+- id: dut-unplugged-still-sends
+  guards: A DUT unplugged from the bus sends nothing on it
+  file: src/benchtare/sim/simulation.py
+  find: "        if ref is None or self.cut:"
+  replace: "        if ref is None:"
+  caught_by:
+    - tests/test_selftest.py::test_a_dut_unplugged_from_the_bus_is_caught

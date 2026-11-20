@@ -98,8 +98,10 @@ def test_a_model_without_options_refuses_them():
 def test_stopping_a_model_stops_its_thread(model):
     recorder, _ = model
     assert recorder.running
+    thread = recorder._thread
     recorder.stop()
     assert not recorder.running
+    assert not thread.is_alive()
 
 
 # --- a team's project -----------------------------------------------------------------------------

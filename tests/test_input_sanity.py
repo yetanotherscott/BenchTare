@@ -6,7 +6,7 @@ Each test shows that a bad input is refused or survived, not silently mishandled
 
 import math
 import textwrap
-import time
+import threading
 import uuid
 
 import pytest
@@ -39,12 +39,22 @@ def bench(request):
 # --- 1. the simulated DUT survives bad inputs ---------------------------------------------------
 
 
-def test_reference_device_ignores_inputs_it_cannot_use():
+def test_reference_device_ignores_inputs_it_cannot_use(eventually):
     published = []
-    device = ReferenceDevice(lambda name, value: published.append((name, value)), boot_delay=0)
+    # No delays: an answer is published as soon as its input is handled, so once the marker
+    # below has run, any answer would have been published.
+    device = ReferenceDevice(
+        lambda name, value: published.append((name, value)),
+        boot_delay=0,
+        echo_delay=0,
+        mode_delay=0,
+    )
     device.start()
     try:
-        time.sleep(0.05)
+        # Booted and heartbeating first, so the inputs are ignored for what they are, not
+        # because it is still booting.
+        eventually(lambda: ("Mode", "standby") in published)
+        before = len(published)
         for name, value in [
             ("Setpoint", "abc"),
             ("Setpoint", None),
@@ -57,21 +67,22 @@ def test_reference_device_ignores_inputs_it_cannot_use():
             ("NoSuchSignal", 1),
         ]:
             device.set_input(name, value)
-        # Still heartbeating: two more heartbeats after the inputs, counted rather than slept
-        # for, so a slow runner can't make this fail.
-        wanted = published.count(("Mode", "standby")) + 2
-        deadline = time.monotonic() + 2.0
-        while published.count(("Mode", "standby")) < wanted and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert published.count(("Mode", "standby")) >= wanted
+        # Runs on the device's thread after every input, and after any answer to one.
+        handled = threading.Event()
+        device.after(0, device.after, 0, handled.set)
+        assert handled.wait(2.0)
+        # It answered none of them: all it has sent since is its heartbeat.
+        assert set(published[before:]) <= {("Mode", "standby")}
+        # And it keeps running: two more heartbeats, counted rather than slept for.
+        now = len(published)
+        eventually(lambda: published[now:].count(("Mode", "standby")) >= 2)
         assert device.running
         assert device.errors == []
-        assert ("supply_ok", True) not in published
     finally:
         device.stop()
 
 
-def test_failing_device_action_is_reported_and_the_device_keeps_running():
+def test_failing_device_action_is_reported_and_the_device_keeps_running(eventually):
     with open_reference() as bench:
         device = bench.simulation.device
 
@@ -79,7 +90,7 @@ def test_failing_device_action_is_reported_and_the_device_keeps_running():
             raise RuntimeError("simulated firmware bug")
 
         device.after(0, broken)
-        time.sleep(0.1)
+        eventually(lambda: device.errors)
         assert device.running
         assert bench.check()[SIMULATION] == [
             "the simulated DUT reference: RuntimeError: simulated firmware bug"
