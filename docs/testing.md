@@ -122,6 +122,11 @@ git checkout src/benchtare/reference/device.py
   arrived after the last write, in order, so its outcome no longer depends on
   how quickly the values came.
 - Count events by waiting for them, not by sleeping and then counting.
+- In a test of waiting itself, deliver the later value only once the wait
+  has started, not on a timer (see `after_checking` in
+  `tests/test_receive_buffer.py`). On a slow runner a timer can fire before
+  the wait begins, and then a wait that never waits still passes: the test
+  passes either way, but catches the break only on a fast machine.
 
 ## Where it falls short
 
@@ -145,7 +150,7 @@ What isn't covered yet, so the gaps are visible rather than hidden:
 | Results: the database, its schema and migrations, the manifest, and how a run is stored | `tests/breaks/results.yaml` | Yes |
 | Signals and the interface description | `tests/breaks/signals.yaml` | Yes |
 | The bench and harness files | `tests/breaks/files.yaml` | Yes |
-| Backends, the read rule and `wait_until` | | Not yet |
+| Backends, the read rule and `wait_until` | `tests/breaks/backends.yaml` | Yes |
 | The reference DUT and DUT models | | Not yet |
 | The pytest plugin and the test record | | Not yet |
 | The hygiene check | | Not yet |

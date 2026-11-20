@@ -1,6 +1,7 @@
 """The receive buffer, which implements the read rule. Deterministic: no simulation, no timing."""
 
 import threading
+import time
 
 from benchtare.backends.base import ReceiveBuffer
 
@@ -84,15 +85,55 @@ def test_wait_for_match_ignores_values_from_before_the_write():
     assert buffer.wait_for_match("Mode", lambda v: v == "run", timeout=0.02) is None
 
 
+def after_checking(checked, count, deliver):
+    """Deliver once the wait has checked ``count`` values, so it is already waiting: the
+    outcome doesn't depend on how quickly the thread runs."""
+
+    def run():
+        deadline = time.monotonic() + 2
+        while len(checked) < count and time.monotonic() < deadline:
+            time.sleep(0.001)
+        deliver()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
 def test_wait_for_match_waits_for_later_values():
     buffer = ReceiveBuffer()
-    timers = [
-        threading.Timer(0.02, buffer.deliver, args=("Mode", "standby")),
-        threading.Timer(0.05, buffer.deliver, args=("Mode", "run")),
-    ]
-    for timer in timers:
-        timer.start()
-    assert buffer.wait_for_match("Mode", lambda v: v == "run", timeout=2).value == "run"
+    with buffer.writing():
+        pass
+    buffer.deliver("Mode", "standby")
+    checked = []
+
+    def is_run(value):
+        checked.append(value)
+        return value == "run"
+
+    thread = after_checking(checked, 1, lambda: buffer.deliver("Mode", "run"))
+    assert buffer.wait_for_match("Mode", is_run, timeout=2).value == "run"
+    thread.join(2)
+    assert checked == ["standby", "run"]
+
+
+def test_wait_for_match_checks_each_value_once_in_order():
+    # So a test can count values with a predicate, such as five heartbeats.
+    buffer = ReceiveBuffer()
+    with buffer.writing():
+        pass
+    buffer.deliver("Mode", "a")
+    buffer.deliver("Mode", "b")
+    checked = []
+
+    def third(value):
+        checked.append(value)
+        return len(checked) == 3
+
+    thread = after_checking(checked, 2, lambda: buffer.deliver("Mode", "c"))
+    assert buffer.wait_for_match("Mode", third, timeout=2).value == "c"
+    thread.join(2)
+    assert checked == ["a", "b", "c"]
 
 
 def test_last_remembers_values_across_writes():

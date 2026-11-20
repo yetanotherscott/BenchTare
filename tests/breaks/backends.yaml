@@ -1,0 +1,184 @@
+# Breaks for the backends, the read rule and wait_until: how values are written, received and
+# waited for. Each break takes one behaviour away; every test it names must then fail. See
+# docs/testing.md.
+
+# --- the read rule -----------------------------------------------------------------------------
+
+- id: read-returns-a-value-from-before-the-write
+  guards: A read returns only a value received after the bench's most recent write
+  file: src/benchtare/backends/base.py
+  find: "            self._first.clear()\n"
+  replace: ""
+  caught_by:
+    - tests/test_receive_buffer.py::test_value_from_before_the_write_is_never_returned
+    - tests/test_bench_runtime.py::test_read_never_returns_a_value_from_before_the_write
+
+- id: read-returns-the-latest-value
+  guards: A read returns the first value received after the write, not the latest
+  file: src/benchtare/backends/base.py
+  find: "            self._first.setdefault(key, item)"
+  replace: "            self._first[key] = item"
+  caught_by:
+    - tests/test_receive_buffer.py::test_first_value_after_write_is_returned
+
+- id: reply-during-the-write-lost
+  guards: A reply the DUT sends before write() has returned counts as after the write
+  file: src/benchtare/backends/base.py
+  find: |2
+            with self.lock:
+                self._seq += 1
+                self._marker = self._seq
+                self._before_write = dict(self._last)
+                self._since_write.clear()
+                self._first.clear()
+                yield
+  replace: |2
+            yield
+            with self.lock:
+                self._seq += 1
+                self._marker = self._seq
+                self._before_write = dict(self._last)
+                self._since_write.clear()
+                self._first.clear()
+  caught_by:
+    - tests/test_receive_buffer.py::test_reply_delivered_during_the_write_counts_as_after_it
+
+- id: wait-sees-values-from-before-the-write
+  guards: wait_until looks only at values received after the most recent write
+  file: src/benchtare/backends/base.py
+  find: "            self._since_write.clear()\n"
+  replace: ""
+  caught_by:
+    - tests/test_receive_buffer.py::test_wait_for_match_ignores_values_from_before_the_write
+
+- id: wait-checks-a-value-again
+  guards: wait_until checks each value that arrived once, in order
+  file: src/benchtare/backends/base.py
+  find: |2
+                        if item.seq <= checked:
+                            continue
+  replace: ""
+  caught_by:
+    - tests/test_receive_buffer.py::test_wait_for_match_checks_each_value_once_in_order
+
+- id: wait-doesnt-wait
+  guards: wait_until waits for later values, up to its timeout
+  file: src/benchtare/backends/base.py
+  find: "                self._changed.wait(remaining)"
+  replace: "                return None"
+  caught_by:
+    - tests/test_receive_buffer.py::test_wait_for_match_waits_for_later_values
+
+# --- writing, reading and waiting on the bench -------------------------------------------------
+
+- id: writing-a-dut-output-allowed
+  guards: A test can't write a DUT output, which the bench reads
+  file: src/benchtare/bench/runtime.py
+  find: |2
+            if not binding.drive:
+                raise WriteError(
+  replace: |2
+            if False:
+                raise WriteError(
+  caught_by:
+    - tests/test_bench_runtime.py::test_writing_a_dut_output_is_refused
+
+- id: reading-a-dut-input-allowed
+  guards: A test can't read a DUT input, which the bench drives
+  file: src/benchtare/bench/runtime.py
+  find: |2
+            if binding.drive:
+                raise BenchError(
+  replace: |2
+            if False:
+                raise BenchError(
+  caught_by:
+    - tests/test_bench_runtime.py::test_reading_a_dut_input_is_refused
+
+- id: value-of-the-wrong-kind-sent
+  guards: A value of a kind the signal doesn't have (text for a number, say) isn't sent
+  file: src/benchtare/bench/runtime.py
+  find: |2
+            if problem is not None:
+                message, hint = problem
+  replace: |2
+            if False:
+                message, hint = problem
+  caught_by:
+    - tests/test_input_sanity.py::test_value_of_the_wrong_kind_is_refused_on_every_harness
+
+- id: predicate-compared-as-a-value
+  guards: wait_until takes a function to say which value it waits for
+  file: src/benchtare/bench/runtime.py
+  find: "expected if _is_predicate(expected) else (lambda value: value == expected)"
+  replace: "(lambda value: value == expected)"
+  caught_by:
+    - tests/test_bench_runtime.py::test_wait_until_accepts_a_predicate
+
+- id: no-match-is-a-read-timeout
+  guards: A wait that saw values but never the one expected fails like an assert, with the last value
+  file: src/benchtare/bench/runtime.py
+  find: |2-
+                if arrived:
+                    self._not_reached(
+  replace: |2-
+                if False:
+                    self._not_reached(
+  caught_by:
+    - tests/test_bench_runtime.py::test_values_that_never_match_fail_like_an_assert_with_the_last_value
+
+# --- the simulated backends --------------------------------------------------------------------
+
+- id: value-too-wide-sent-as-zeros
+  guards: A value too wide for its bits in the frame is refused, saying what the bits can carry
+  file: src/benchtare/backends/_can_codec.py
+  find: |2
+            except Exception as exc:  # noqa: BLE001 - cantools raises many kinds; all mean "can't encode"
+                raise CarryError(str(exc) or type(exc).__name__, _limits(dbc_signal)) from None
+  replace: |2
+            except Exception:  # noqa: BLE001
+                data = bytes(message.length)
+  caught_by:
+    - tests/test_bench_runtime.py::test_value_too_wide_for_its_bits_fails_clearly
+
+- id: can-benches-share-a-bus
+  guards: Every simulated CAN bus opened is its own, so two benches in one process stay apart
+  file: src/benchtare/backends/sim_can.py
+  find: 'self.bus_name = self._fixed_bus_name or f"benchtare-{self.equipment}-{uuid.uuid4().hex}"'
+  replace: 'self.bus_name = self._fixed_bus_name or f"benchtare-{self.equipment}"'
+  caught_by:
+    - tests/test_bench_runtime.py::test_two_can_benches_in_one_process_are_isolated
+
+- id: failed-can-interface-still-receives
+  guards: A failed CAN interface passes nothing, so reads say which equipment failed
+  file: src/benchtare/backends/sim_can.py
+  find: |2
+            if self._failure is not None:
+                return
+            self._traffic.set()
+  replace: |2
+            self._traffic.set()
+  caught_by:
+    - tests/test_bench_runtime.py::test_failed_equipment_is_named_in_read_timeouts
+
+- id: failed-io-accepts-writes
+  guards: Failed channel equipment refuses writes, saying why
+  file: src/benchtare/backends/sim.py
+  find: |2
+            if self._failure is not None:
+                raise WriteError(
+                    f"can't write {binding.key} on {binding.endpoint}: {self._failure}",
+  replace: |2
+            if False:
+                raise WriteError(
+                    f"can't write {binding.key} on {binding.endpoint}: {self._failure}",
+  caught_by:
+    - tests/test_bench_runtime.py::test_failed_equipment_is_reported_and_refuses_writes
+
+- id: cut-wire-still-drives
+  guards: Nothing passes through a cut wire
+  file: src/benchtare/backends/sim.py
+  find: "        if far is not None and binding.channel not in self._cut:"
+  replace: "        if far is not None:"
+  caught_by:
+    - tests/test_bench_runtime.py::test_cut_loopback_reads_nothing
