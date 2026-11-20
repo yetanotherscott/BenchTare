@@ -154,5 +154,5 @@ What isn't covered yet, so the gaps are visible rather than hidden:
 | The reference DUT and DUT models | `tests/breaks/dut.yaml` | Yes |
 | The pytest plugin and the test record | | Not yet |
 | The hygiene check | | Not yet |
-| The test check | | Not yet |
+| The test check | `tests/breaks/testcheck.yaml` | Yes |
 | The CLI and `benchtare init` | | Not yet |

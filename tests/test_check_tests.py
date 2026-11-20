@@ -398,6 +398,10 @@ def test_a_test_that_fails_when_run_again_is_not_checked_for_test_hygiene(projec
         ]
     )
     result.stdout.no_fnmatch_line("    *")  # no step is judged, and no rerun is listed
+    # The walk stopped at the control: no reading was rerun.
+    assert query(project, "SELECT mode, outcome FROM test_checks") == [
+        ("control", "not repeatable")
+    ]
 
 
 def test_a_test_that_takes_different_readings_is_not_checked_for_test_hygiene(project):

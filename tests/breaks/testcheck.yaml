@@ -1,0 +1,204 @@
+# Breaks for the test check: how it corrupts readings, and how it judges each rerun, reading and
+# test. Each break takes one behaviour away; every test it names must then fail. See
+# docs/testing.md.
+
+# --- the corrupted values ----------------------------------------------------------------------
+
+- id: shift-leaves-numbers-alone
+  guards: shift moves a number by its own size, so a check that accepts any value is caught
+  file: src/benchtare/testcheck.py
+  find: "        moved = value + max(1, abs(value))"
+  replace: "        moved = value"
+  caught_by:
+    - tests/test_testcheck.py::test_shift_gives_a_clearly_different_value_of_the_same_kind[42.0-84.0]
+    - tests/test_check_tests.py::test_the_check_is_stored_with_each_tests_verdict_and_reruns
+
+- id: shift-leaves-zero-alone
+  guards: shift moves a number by at least 1, so a zero or small reading still changes clearly
+  file: src/benchtare/testcheck.py
+  find: "        moved = value + max(1, abs(value))"
+  replace: "        moved = value + abs(value)"
+  caught_by:
+    - tests/test_testcheck.py::test_shift_gives_a_clearly_different_value_of_the_same_kind[0-1]
+    - tests/test_testcheck.py::test_shift_gives_a_clearly_different_value_of_the_same_kind[0.25-1.25]
+
+- id: shift-leaves-bools-alone
+  guards: shift inverts a bool
+  file: src/benchtare/testcheck.py
+  find: "        return True, not value"
+  replace: "        return True, value"
+  caught_by:
+    - tests/test_testcheck.py::test_shift_gives_a_clearly_different_value_of_the_same_kind[True-False]
+    - tests/test_testcheck.py::test_shift_gives_a_clearly_different_value_of_the_same_kind[False-True]
+
+- id: shift-leaves-enums-alone
+  guards: shift moves an enum to its next state
+  file: src/benchtare/testcheck.py
+  find: "            return True, states[(states.index(value) + 1) % len(states)]"
+  replace: "            return True, value"
+  caught_by:
+    - tests/test_testcheck.py::test_shift_moves_an_enum_to_its_next_state
+
+- id: stale-gives-what-arrived
+  guards: stale gives the test the value from before the bench's most recent write
+  file: src/benchtare/bench/runtime.py
+  find: "            return before.value != value, before.value"
+  replace: "            return before.value != value, value"
+  caught_by:
+    - tests/test_testcheck.py::test_stale_gives_the_test_the_value_from_before_the_write
+
+# --- which readings are corrupted --------------------------------------------------------------
+
+- id: every-reading-corrupted
+  guards: Each rerun corrupts only its one reading, so every earlier step reads real values
+  file: src/benchtare/bench/runtime.py
+  find: |2
+            if self.corrupt_at is not None and reading.index != self.corrupt_at:
+                return False, value
+            if mode == SHIFT:
+  replace: |2
+            if mode == SHIFT:
+  caught_by:
+    - tests/test_testcheck.py::test_only_the_targeted_reading_is_corrupted
+
+- id: unchecked-reading-corrupted
+  guards: A reading taken with check=False is never corrupted
+  file: src/benchtare/bench/runtime.py
+  find: "        if mode is None or not reading.checked:"
+  replace: "        if mode is None:"
+  caught_by:
+    - tests/test_testcheck.py::test_a_reading_marked_unchecked_is_never_corrupted
+
+- id: corrupted-wait-not-noticed
+  guards: A wait counts as corrupted if any value it saw was, even if the last one wasn't
+  file: src/benchtare/bench/runtime.py
+  find: |2
+            if applied:
+                reading.corrupted = True
+  replace: |2
+            if False:
+                reading.corrupted = True
+  caught_by:
+    - tests/test_testcheck.py::test_a_wait_counts_as_corrupted_if_any_value_it_saw_was
+
+- id: staging-corrupted
+  guards: Staging and teardown read the real values; only the test's body is corrupted
+  file: src/benchtare/plugin.py
+  find: '        body = phase == "call" and self.bench is not None'
+  replace: "        body = self.bench is not None"
+  caught_by:
+    - tests/test_check_tests.py::test_staging_reads_the_real_values
+
+# --- judging each rerun ------------------------------------------------------------------------
+
+- id: failing-control-ignored
+  guards: A test that fails when run again unchanged doesn't repeat, so its logic isn't judged
+  file: src/benchtare/plugin.py
+  find: |2-
+        if not call.passed:
+            return result(
+                testcheck.NOT_REPEATABLE,
+                f"it {call.outcome} when it ran again unchanged,
+  replace: |2-
+        if False:
+            return result(
+                testcheck.NOT_REPEATABLE,
+                f"it {call.outcome} when it ran again unchanged,
+  caught_by:
+    - tests/test_check_tests.py::test_a_test_that_fails_when_run_again_is_not_checked_for_test_hygiene
+
+- id: control-readings-not-compared
+  guards: A test that takes other readings when run again doesn't repeat
+  file: src/benchtare/plugin.py
+  find: "    if taken != expected:"
+  replace: "    if False:"
+  caught_by:
+    - tests/test_check_tests.py::test_a_test_that_takes_different_readings_is_not_checked_for_test_hygiene
+
+- id: failure-before-the-step-counts
+  guards: A failure before the corrupted step isn't the corruption's doing; the test doesn't repeat
+  file: src/benchtare/plugin.py
+  find: |2
+                    testcheck.NOT_REPEATABLE,
+                    f"on the rerun for reading {step.index}, it failed at {at} before reaching "
+  replace: |2
+                    testcheck.FAILED,
+                    f"on the rerun for reading {step.index}, it failed at {at} before reaching "
+  caught_by:
+    - tests/test_check_tests.py::test_a_failure_before_the_corrupted_step_means_the_test_doesnt_repeat
+
+- id: nothing-arrived-counts-as-caught
+  guards: A rerun that ends because nothing arrived proves nothing
+  file: src/benchtare/plugin.py
+  find: |2-
+            if getattr(call, "benchtare_nothing_arrived", False):
+                return result(testcheck.INCONCLUSIVE,
+  replace: |2-
+            if False:
+                return result(testcheck.INCONCLUSIVE,
+  caught_by:
+    - tests/test_check_tests.py::test_a_rerun_where_nothing_arrives_proves_nothing
+
+- id: failure-with-nothing-corrupted-counts
+  guards: A rerun that fails with nothing corrupted shows the test doesn't repeat
+  file: src/benchtare/plugin.py
+  find: |2
+            if not target.corrupted:
+                return result(
+                    testcheck.NOT_REPEATABLE,
+  replace: |2
+            if False:
+                return result(
+                    testcheck.NOT_REPEATABLE,
+  caught_by:
+    - tests/test_check_tests.py::test_a_failure_with_nothing_corrupted_means_the_test_doesnt_repeat
+
+- id: walk-goes-on-after-a-hygiene-problem
+  guards: Once a test shows it doesn't repeat, the walk through its readings stops
+  file: src/benchtare/plugin.py
+  find: |2
+                    if results[-1].outcome == testcheck.NOT_REPEATABLE:
+                        break  # test hygiene: nothing further would prove anything
+  replace: ""
+  caught_by:
+    - tests/test_check_tests.py::test_a_test_that_fails_when_run_again_is_not_checked_for_test_hygiene
+
+# --- the verdicts ------------------------------------------------------------------------------
+
+- id: a-failing-mode-not-counted
+  guards: A reading can fail if some mode made the test fail there
+  file: src/benchtare/testcheck.py
+  find: |2
+        if FAILED in outcomes:
+            return ABLE
+  replace: ""
+  caught_by:
+    - tests/test_testcheck.py::test_the_verdict_on_one_reading[outcomes0-able to fail]
+    - tests/test_testcheck.py::test_the_verdict_on_one_reading[outcomes1-able to fail]
+
+- id: one-reading-decides-the-test
+  guards: A test can fail only if every checked reading can
+  file: src/benchtare/testcheck.py
+  find: "    for decisive in (UNABLE, UNKNOWN, ABLE):"
+  replace: "    for decisive in (ABLE, UNKNOWN, UNABLE):"
+  caught_by:
+    - tests/test_testcheck.py::test_a_test_can_fail_only_if_every_reading_can
+    - tests/test_check_tests.py::test_a_step_that_isnt_checked_makes_the_test_unable_to_fail
+
+- id: unrepeatable-test-judged
+  guards: A test that doesn't repeat gets no verdict on its logic
+  file: src/benchtare/testcheck.py
+  find: |2
+        if any(r.outcome == NOT_REPEATABLE for r in results):
+            return NOT_CHECKED  # test hygiene: no rerun of it proves anything about its logic
+  replace: ""
+  caught_by:
+    - tests/test_testcheck.py::test_a_test_that_doesnt_repeat_isnt_judged_on_its_logic
+
+- id: test-that-cant-fail-passes-the-check
+  guards: A test that can't fail fails the test check, even though every test passed
+  file: src/benchtare/plugin.py
+  find: "        unable = any(test.verdict == testcheck.UNABLE for test in self.checked)"
+  replace: "        unable = False"
+  caught_by:
+    - tests/test_cli.py::test_check_tests_exits_1_when_a_test_cant_fail
