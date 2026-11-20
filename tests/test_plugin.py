@@ -62,8 +62,9 @@ def project(pytester):
     return pytester
 
 
-def no_reference_threads():
-    return not any(t.name == "benchtare-reference-dut" for t in threading.enumerate())
+def bench_threads():
+    """The threads BenchTare starts (the DUT model's, samplers, CAN receivers) still running."""
+    return [t.name for t in threading.enumerate() if t.name.startswith("benchtare-")]
 
 
 # --- the example runs, with no BenchTare imports in the tests -------------------------------------
@@ -435,10 +436,10 @@ def test_bench_is_not_opened_when_no_test_needs_it(project):
     result.assert_outcomes(passed=1)
 
 
-def test_bench_is_closed_when_the_run_ends(project):
+def test_bench_is_closed_when_the_run_ends(project, eventually):
     result = project.runpytest(*cli())
     result.assert_outcomes(passed=2)
-    assert no_reference_threads()
+    eventually(lambda: not bench_threads())
 
 
 # --- the test record -----------------------------------------------------------------------------

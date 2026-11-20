@@ -1,0 +1,164 @@
+# Breaks for the pytest plugin and the test record: configuration, the fixtures, the record of
+# what happened at the bench, the DUT's identity, and what a run warns about. Each break takes
+# one behaviour away; every test it names must then fail. See docs/testing.md.
+
+# --- configuration -----------------------------------------------------------------------------
+
+- id: command-line-loses-to-the-ini
+  guards: A file given on the command line overrides the ini file's
+  file: src/benchtare/plugin.py
+  find: |2
+                found[name] = Path(config.invocation_params.dir) / Path(cli).expanduser()
+                continue
+  replace: |2
+                found[name] = Path(config.invocation_params.dir) / Path(cli).expanduser()
+  caught_by:
+    - tests/test_plugin.py::test_command_line_overrides_the_ini_file
+
+- id: checks-run-together
+  guards: Each check runs on its own, so --check-tests, --check-hygiene and --selftest-only can't be combined
+  file: src/benchtare/plugin.py
+  find: "    if len(chosen) > 1:"
+  replace: "    if False:"
+  caught_by:
+    - tests/test_check_hygiene.py::test_check_hygiene_runs_on_its_own_on_a_configured_bench[with-check-tests]
+    - tests/test_check_tests.py::test_check_tests_needs_a_configured_bench_and_tests[with-selftest-only]
+
+- id: record-level-option-ignored
+  guards: --bench-record sets the test record's level
+  file: src/benchtare/plugin.py
+  find: '    value = config.getoption("benchtare_record") or config.getini("benchtare_record")'
+  replace: '    value = config.getini("benchtare_record")'
+  caught_by:
+    - tests/test_plugin.py::test_record_level_results_leaves_out_writes
+    - tests/test_plugin.py::test_record_level_debug_adds_frames
+
+- id: unknown-record-level-taken-as-the-default
+  guards: An unknown test record level is refused, listing the levels
+  file: src/benchtare/record.py
+  find: |2
+            except KeyError:
+                raise ValueError(
+  replace: |2
+            except KeyError:
+                return DEFAULT_LEVEL
+                raise ValueError(
+  caught_by:
+    - tests/test_record.py::test_an_unknown_level_lists_the_levels
+    - tests/test_plugin.py::test_unknown_record_level_is_a_usage_error
+
+- id: unconfigured-fixture-says-nothing-useful
+  guards: Asking for bench or signals when BenchTare isn't configured says what to set
+  file: src/benchtare/plugin.py
+  find: "        pytest.fail(NOT_CONFIGURED.format(fixture=fixture), pytrace=False)"
+  replace: '        pytest.fail("BenchTare is not configured", pytrace=False)'
+  caught_by:
+    - tests/test_plugin.py::test_fixture_without_configuration_says_what_to_set[bench]
+    - tests/test_plugin.py::test_fixture_without_configuration_says_what_to_set[signals]
+
+- id: bench-left-open
+  guards: The bench is closed when the run ends
+  file: src/benchtare/plugin.py
+  find: |2
+        def pytest_sessionfinish(self, session: pytest.Session) -> None:
+            if self.bench is not None:
+                self.bench.close()
+  replace: |2
+        def pytest_sessionfinish(self, session: pytest.Session) -> None:
+            pass
+  caught_by:
+    - tests/test_plugin.py::test_bench_is_closed_when_the_run_ends
+
+# --- the test record ---------------------------------------------------------------------------
+
+- id: record-level-ignored
+  guards: The record keeps only what its level asks for
+  file: src/benchtare/bench/runtime.py
+  find: "        if entry.unexpected or entry.level <= self._record_level:"
+  replace: "        if True:"
+  caught_by:
+    - tests/test_record.py::test_results_level_keeps_readings_and_comparisons_but_not_writes
+
+- id: unexpected-filtered-by-level
+  guards: Anything unexpected is recorded at every level, so no setting can hide it
+  file: src/benchtare/record.py
+  find: "UNEXPECTED = frozenset({FRAME_MISMATCH, EQUIPMENT_FAILURE, IDENTITY_CHANGE})"
+  replace: "UNEXPECTED = frozenset({FRAME_MISMATCH, EQUIPMENT_FAILURE})"
+  caught_by:
+    - tests/test_identity.py::test_a_change_during_the_run_keeps_both_values_and_is_unexpected
+
+- id: unexpected-lost-without-a-recorder
+  guards: With nothing recording, an unexpected event is logged as a warning rather than lost
+  file: src/benchtare/bench/runtime.py
+  find: |2-
+                if entry.unexpected:
+                    log.warning("%s", entry.text)
+  replace: |2-
+                if False:
+                    log.warning("%s", entry.text)
+  caught_by:
+    - tests/test_record.py::test_with_no_recorder_unexpected_events_are_logged_as_warnings
+
+- id: record-left-out-of-the-report
+  guards: A failed test's report shows its record
+  file: src/benchtare/plugin.py
+  find: '                report.sections.append((f"BenchTare record {phase}", render(entries)))'
+  replace: "                pass"
+  caught_by:
+    - tests/test_plugin.py::test_a_failed_test_shows_its_record
+
+- id: unexpected-during-a-test-not-warned
+  guards: Something unexpected during a test is warned about, against that test
+  file: src/benchtare/plugin.py
+  find: '            _warn_unexpected(item.warn, f"during {phase}", unexpected)'
+  replace: "            pass"
+  caught_by:
+    - tests/test_plugin.py::test_bad_frames_are_recorded_and_warned_about_but_the_test_passes
+
+- id: unexpected-after-the-last-test-not-warned
+  guards: Something unexpected after the last test is still reported
+  file: src/benchtare/plugin.py
+  find: '        _warn_unexpected(self._warn_at_description, "after the last test", self._after_last_test)'
+  replace: "        pass"
+  caught_by:
+    - tests/test_plugin.py::test_bad_frames_after_the_last_test_are_reported
+
+# --- the DUT's identity ------------------------------------------------------------------------
+
+- id: identity-signals-not-read
+  guards: Identity items that name a DUT output are read before the first test
+  file: src/benchtare/bench/runtime.py
+  find: "            self.collect_identity(item.name, received.value, SIGNAL, signal=item.signal)"
+  replace: "            pass"
+  caught_by:
+    - tests/test_identity.py::test_identity_signals_are_read_before_the_first_test
+
+- id: identity-not-stored-as-text
+  guards: An identity value is stored as text
+  file: src/benchtare/bench/runtime.py
+  find: "        text = str(value)\n"
+  replace: "        text = value\n"
+  caught_by:
+    - tests/test_identity.py::test_values_are_stored_as_text
+
+- id: same-identity-recorded-again
+  guards: Giving the same identity value again changes nothing
+  file: src/benchtare/bench/runtime.py
+  find: |2
+                if previous == text:
+                    return
+  replace: ""
+  caught_by:
+    - tests/test_identity.py::test_the_same_value_again_changes_nothing
+
+- id: identity-change-not-recorded
+  guards: An identity value that changes during the run is recorded as unexpected
+  file: src/benchtare/bench/runtime.py
+  find: |2
+            if previous is not None:
+                self._note(
+  replace: |2
+            if False:
+                self._note(
+  caught_by:
+    - tests/test_identity.py::test_a_change_during_the_run_keeps_both_values_and_is_unexpected

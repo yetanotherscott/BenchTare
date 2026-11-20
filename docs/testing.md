@@ -152,7 +152,7 @@ What isn't covered yet, so the gaps are visible rather than hidden:
 | The bench and harness files | `tests/breaks/files.yaml` | Yes |
 | Backends, the read rule and `wait_until` | `tests/breaks/backends.yaml` | Yes |
 | The reference DUT and DUT models | `tests/breaks/dut.yaml` | Yes |
-| The pytest plugin and the test record | | Not yet |
+| The pytest plugin and the test record | `tests/breaks/plugin.yaml` | Yes |
 | The hygiene check | `tests/breaks/hygiene.yaml` | Yes |
 | The test check | `tests/breaks/testcheck.yaml` | Yes |
 | The CLI and `benchtare init` | | Not yet |
