@@ -1,0 +1,185 @@
+# Breaks for the self-test: the bench check, the harness check, and how a run uses them.
+# Each break takes one behaviour away; every test it names must then fail. See docs/testing.md.
+
+# --- the bench check ---------------------------------------------------------------------------
+
+- id: equipment-check-ignored
+  guards: Equipment that reports a problem fails the bench check
+  file: src/benchtare/selftest/checks.py
+  find: "        problems = bench.backend(item.id).check()\n"
+  replace: "        problems = []\n"
+  caught_by:
+    - tests/test_selftest.py::test_failed_equipment_is_caught_and_its_checks_are_skipped
+    - tests/test_selftest.py::test_a_failed_bus_is_caught
+
+- id: stopped-simulation-ignored
+  guards: A simulated DUT that stopped running fails the bench check
+  file: src/benchtare/selftest/checks.py
+  find: "        problems = bench.simulation.check()\n"
+  replace: "        problems = []\n"
+  caught_by:
+    - tests/test_selftest.py::test_a_simulation_that_stopped_is_caught
+
+- id: empty-self-test-passes
+  guards: A self-test that checked nothing doesn't pass
+  file: src/benchtare/selftest/checks.py
+  find: "return bool(self.checks) and all("
+  replace: "return all("
+  caught_by:
+    - tests/test_selftest.py::test_an_empty_self_test_does_not_pass
+
+# --- the harness check -------------------------------------------------------------------------
+
+- id: loopback-never-checked
+  guards: A loopback that doesn't read back what was driven fails the harness check
+  file: src/benchtare/selftest/checks.py
+  find: "            if bench.wait_channel(read, value, LOOPBACK_TIMEOUT) is None:"
+  replace: "            if False:"
+  caught_by:
+    - tests/test_selftest.py::test_a_cut_loopback_wire_is_caught
+    - tests/test_selftest.py::test_a_cut_wire_fails_the_harness_check_not_the_bench_check
+
+- id: loopback-drives-one-level
+  guards: A loopback is driven both ways, so a line stuck at one level is caught
+  file: src/benchtare/selftest/checks.py
+  find: "LOOPBACK_VALUES = (True, False)"
+  replace: "LOOPBACK_VALUES = (True,)"
+  caught_by:
+    - tests/test_selftest.py::test_a_loopback_stuck_at_one_level_is_caught
+
+- id: loopback-error-passes
+  guards: A loopback whose channel raises an error fails the harness check
+  file: src/benchtare/selftest/checks.py
+  find: 'return CheckResult("loopback", name, FAILED, str(exc).split("\n")[0], hint=hint)'
+  replace: 'return CheckResult("loopback", name, PASSED, str(exc).split("\n")[0], hint=hint)'
+  caught_by:
+    - tests/test_selftest.py::test_a_loopback_that_raises_an_error_is_caught
+
+- id: bus-presence-always-passes
+  guards: A bus with no DUT traffic fails its presence check
+  file: src/benchtare/selftest/checks.py
+  find: "if isinstance(backend, BusBackend) and backend.wait_for_traffic(presence.within):"
+  replace: "if isinstance(backend, BusBackend):"
+  caught_by:
+    - tests/test_selftest.py::test_a_dut_unplugged_from_the_bus_is_caught
+
+- id: signal-presence-always-passes
+  guards: A signal the DUT never sends fails its presence check
+  file: src/benchtare/selftest/checks.py
+  find: |2
+        if item is not None:
+            return CheckResult("presence", name, PASSED, f"{signal} = {item.value!r} on {endpoint}")
+  replace: |2
+        return CheckResult(
+            "presence", name, PASSED, f"{signal} = {getattr(item, 'value', None)!r} on {endpoint}"
+        )
+  caught_by:
+    - tests/test_selftest.py::test_a_dut_that_never_boots_is_caught
+
+# --- the two verdicts --------------------------------------------------------------------------
+
+- id: checks-on-failed-equipment-still-run
+  guards: A harness check on equipment that failed the bench check is not checked, not failed
+  file: src/benchtare/selftest/checks.py
+  find: "    broken = sorted(set(uses) & failed)"
+  replace: "    broken = []"
+  caught_by:
+    - tests/test_selftest.py::test_failed_equipment_is_caught_and_its_checks_are_skipped
+    - tests/test_selftest.py::test_failed_equipment_fails_the_bench_check_and_leaves_its_harness_checks_not_checked
+
+- id: loopback-counted-in-the-bench-check
+  guards: A cut loopback wire fails the harness check, not the bench check
+  file: src/benchtare/selftest/checks.py
+  find: '    "loopback": HARNESS,'
+  replace: '    "loopback": BENCH,'
+  caught_by:
+    - tests/test_selftest.py::test_a_cut_wire_fails_the_harness_check_not_the_bench_check
+
+- id: not-checked-counts-as-passed
+  guards: A harness whose checks couldn't run is "not checked", not passed
+  file: src/benchtare/selftest/checks.py
+  find: |2
+            if any(check.outcome == SKIPPED for check in checks):
+                return SKIPPED
+  replace: ""
+  caught_by:
+    - tests/test_selftest.py::test_failed_equipment_fails_the_bench_check_and_leaves_its_harness_checks_not_checked
+
+- id: unopened-bench-passes-the-harness
+  guards: When the bench couldn't be opened, the harness check is "not checked", not passed
+  file: src/benchtare/selftest/checks.py
+  find: "        if area == HARNESS and not checks and self.outcome_of(BENCH) == FAILED:"
+  replace: "        if False:"
+  caught_by:
+    - tests/test_selftest.py::test_a_bench_that_could_not_open_leaves_the_harness_check_not_run
+
+# --- how a run uses it -------------------------------------------------------------------------
+
+- id: failed-self-test-runs-the-tests
+  guards: A failed self-test stops the run before any test
+  file: src/benchtare/plugin.py
+  find: |2
+            if not result.passed:
+                pytest.exit(_selftest_failed(result), returncode=pytest.ExitCode.INTERRUPTED)
+  replace: ""
+  caught_by:
+    - tests/test_plugin.py::test_a_failed_self_test_stops_the_run_before_any_test
+
+- id: self-test-runs-when-only-collecting
+  guards: Collecting only (--collect-only) doesn't open the bench or run the self-test
+  file: src/benchtare/plugin.py
+  find: "        if config.option.collectonly or session.testsfailed or not session.items:"
+  replace: "        if session.testsfailed or not session.items:"
+  caught_by:
+    - tests/test_plugin.py::test_collecting_only_does_not_run_the_self_test
+
+- id: self-test-runs-when-no-test-uses-the-bench
+  guards: The self-test runs only if a collected test uses the bench
+  file: src/benchtare/plugin.py
+  find: '        if not any("bench" in getattr(item, "fixturenames", ()) for item in session.items):'
+  replace: "        if False:"
+  caught_by:
+    - tests/test_plugin.py::test_the_self_test_does_not_run_when_no_test_uses_the_bench
+
+- id: self-test-only-collects-the-tests
+  guards: --selftest-only collects no tests, so a test file that can't be imported doesn't stop it
+  file: src/benchtare/plugin.py
+  find: |2
+            if self.selftest_only:
+                session.items = []
+                return True  # collect nothing: only the self-test runs
+  replace: ""
+  caught_by:
+    - tests/test_plugin.py::test_selftest_only_does_not_collect_the_tests
+
+- id: self-test-only-exit-code-left-at-5
+  guards: --selftest-only exits 0 when the self-test passed and 1 when it failed
+  file: src/benchtare/plugin.py
+  find: "            session.exitstatus = pytest.ExitCode.OK if ok else pytest.ExitCode.TESTS_FAILED\n"
+  replace: "            pass\n"
+  caught_by:
+    - tests/test_plugin.py::test_selftest_only_fails_with_exit_code_1
+    - tests/test_cli.py::test_selftest_passes_on_the_healthy_reference
+    - tests/test_cli.py::test_a_failed_selftest_exits_1
+
+- id: self-test-command-runs-the-tests
+  guards: benchtare selftest runs the self-test alone, not the tests
+  file: src/benchtare/cli.py
+  find: 'pytest.main(["--selftest-only", "-p", "no:cacheprovider", *rest])'
+  replace: 'pytest.main(["-p", "no:cacheprovider", *rest])'
+  caught_by:
+    - tests/test_cli.py::test_selftest_passes_on_the_healthy_reference
+
+- id: self-test-record-goes-to-the-first-test
+  guards: What the self-test does at the bench is recorded apart from the first test
+  file: src/benchtare/plugin.py
+  find: |2-
+                if self._in_pretest:
+                    self.pretest_record.append(entry)
+                elif
+  replace: |2-
+                if False:
+                    self.pretest_record.append(entry)
+                elif
+  caught_by:
+    - tests/test_plugin.py::test_each_report_carries_the_record_of_its_phase

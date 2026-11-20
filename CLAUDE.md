@@ -12,6 +12,8 @@ Read these before making design decisions:
   the reference for terms and concepts.
 - `docs/design-brief.md`: goals, non-goals, architecture, prior art.
 - `docs/first-slice-plan.md`: what is being built now, and in what order.
+- `docs/testing.md`: how BenchTare tests itself: recorded breaks, the
+  slowed-DUT run, and what isn't covered yet.
 
 ## Current scope
 
@@ -83,6 +85,9 @@ Use these names consistently in code, docs and messages.
   plugin itself.
 - Every new behaviour gets a test. For the self-test and results code, also
   add a test that proves a failure is detected, not only that success passes.
+  Every new test comes with a recorded break in `tests/breaks/` that it
+  catches, in the same commit (`docs/testing.md`). A break that isn't caught
+  has found a gap: strengthen the test, don't change the break.
 - A test failure is never ignored, rerun until it passes, or put down to a slow
   runner without finding its cause. A test that fails only sometimes depends on
   timing or order: fix it so its outcome doesn't, and show the fix by
@@ -123,6 +128,7 @@ Use these names consistently in code, docs and messages.
 ```
 pip install -e ".[dev]"    # install for development
 pytest                     # run the test suite
+pytest -m breaks           # prove each recorded break is caught (slow)
 ruff check . && ruff format --check .
 benchtare init demo    # write the quickstart project into demo/
 benchtare selftest --dut … --bench … --harness …   # the self-test alone

@@ -1,0 +1,308 @@
+# Breaks for results: the database, its schema and migrations, the manifest, and how a run is
+# stored. Each break takes one behaviour away; every test it names must then fail. See
+# docs/testing.md.
+
+# --- opening the database: create, migrate or refuse -------------------------------------------
+
+- id: newer-database-accepted
+  guards: A database written by a newer BenchTare is refused, and left alone
+  file: src/benchtare/results/schema.py
+  find: |2
+        if version > SCHEMA_VERSION:
+            raise ResultsError(
+  replace: |2
+        if False:
+            raise ResultsError(
+  caught_by:
+    - tests/test_results_store.py::test_a_newer_database_is_refused_and_left_alone
+    - tests/test_results_plugin.py::test_a_newer_results_database_stops_the_run_before_it_starts
+
+- id: other-sqlite-file-accepted
+  guards: An SQLite file with someone else's tables is refused
+  file: src/benchtare/results/schema.py
+  find: |2
+            if tables:
+                raise ResultsError(
+  replace: |2
+            if False:
+                raise ResultsError(
+  caught_by:
+    - tests/test_results_store.py::test_an_sqlite_file_with_other_tables_is_refused
+
+- id: non-sqlite-file-not-named
+  guards: A file that isn't SQLite at all is refused, saying so
+  file: src/benchtare/results/schema.py
+  find: "    if header and header != _SQLITE_HEADER:"
+  replace: "    if False:"
+  caught_by:
+    - tests/test_results_store.py::test_a_file_that_is_not_sqlite_is_refused
+
+- id: no-backup-before-migrating
+  guards: An older database is backed up before it is migrated
+  file: src/benchtare/results/schema.py
+  find: "        _back_up(path, backup)\n"
+  replace: "        pass\n"
+  caught_by:
+    - tests/test_results_store.py::test_an_older_database_is_backed_up_and_migrated
+
+- id: migration-not-all-or-nothing
+  guards: A migration that fails part-way leaves the database as it was
+  file: src/benchtare/results/schema.py
+  find: |2
+        with transaction(db):
+            version = _usable_version(db, path)
+            if version == 0:
+  replace: |2
+        if True:
+            version = _usable_version(db, path)
+            if version == 0:
+  caught_by:
+    - tests/test_results_store.py::test_a_failed_migration_leaves_the_database_unchanged
+
+- id: commits-wait-for-the-disk
+  guards: Commits don't wait for the disk, so runs sharing the file don't starve each other
+  file: src/benchtare/results/schema.py
+  find: '        db.execute("PRAGMA synchronous = NORMAL")'
+  replace: '        db.execute("PRAGMA synchronous = FULL")'
+  caught_by:
+    - tests/test_results_store.py::test_commits_dont_wait_for_the_disk_so_runs_sharing_the_file_dont_starve
+
+- id: busy-not-retried
+  guards: Opening waits while another run writes, rather than failing at the first "busy"
+  file: src/benchtare/results/schema.py
+  find: |2
+                if not _is_busy(exc) or time.monotonic() >= deadline:
+                    raise
+  replace: |2
+                raise
+  caught_by:
+    - tests/test_results_store.py::test_opening_waits_while_another_run_writes_during_the_switch_to_wal
+
+- id: busy-said-to-be-damaged
+  guards: A database another program holds is reported as busy, not as damaged
+  file: src/benchtare/results/schema.py
+  find: |2
+            if _is_busy(exc):
+                raise _busy(path) from None
+            raise _unreadable(path, exc) from None
+  replace: |2
+            raise _unreadable(path, exc) from None
+  caught_by:
+    - tests/test_results_store.py::test_a_database_another_program_holds_says_so
+
+# --- writing -----------------------------------------------------------------------------------
+
+- id: run-id-overwritten
+  guards: A run id already stored is refused, not overwritten
+  file: src/benchtare/results/store.py
+  find: '"""INSERT INTO runs (id, kind, status,'
+  replace: '"""INSERT OR REPLACE INTO runs (id, kind, status,'
+  caught_by:
+    - tests/test_results_store.py::test_a_run_id_already_stored_is_refused_not_overwritten
+
+- id: write-failure-not-explained
+  guards: A write that fails says which database, and what to check
+  file: src/benchtare/results/store.py
+  find: |2
+            except sqlite3.Error as exc:
+                raise write_failed(self.path, exc) from None
+  replace: |2
+            except ResultsError:
+                raise
+  caught_by:
+    - tests/test_results_store.py::test_a_write_that_fails_says_which_database_and_what_to_check
+
+- id: bools-not-numbers-for-trends
+  guards: A bool reading is stored as a number too (0 or 1), for trends
+  file: src/benchtare/results/store.py
+  find: "    if isinstance(value, numbers.Real):\n"
+  replace: "    if isinstance(value, numbers.Real) and not isinstance(value, bool):\n"
+  caught_by:
+    - tests/test_results_store.py::test_record_entries_keep_their_types_and_numbers_for_trends
+
+- id: non-finite-numbers-for-trends
+  guards: A reading that isn't a finite number has no number for trends
+  file: src/benchtare/results/store.py
+  find: "        return number if math.isfinite(number) else None"
+  replace: "        return number"
+  caught_by:
+    - tests/test_results_store.py::test_record_entries_keep_their_types_and_numbers_for_trends
+
+# --- when each test file was last checked ------------------------------------------------------
+
+- id: unfinished-check-counts
+  guards: A test check or hygiene check that never finished doesn't count as a check
+  file: src/benchtare/results/store.py
+  find: "WHERE r.kind = ? AND r.status = ? AND m.path = ? AND r.id != ?"
+  replace: "WHERE r.kind = ? AND (r.status = ? OR 1) AND m.path = ? AND r.id != ?"
+  caught_by:
+    - tests/test_results_store.py::test_a_check_that_never_finished_doesnt_count
+
+- id: another-duts-check-counts
+  guards: Only a check of the same DUT counts as a test file's last check
+  file: src/benchtare/results/store.py
+  find: "AND r.dut = (SELECT dut FROM runs WHERE id = ?)"
+  replace: "AND ? IS NOT NULL"
+  caught_by:
+    - tests/test_results_store.py::test_each_test_file_says_when_it_was_last_checked
+
+- id: changed-since-check-inverted
+  guards: A test file is unchanged since its last check only when its hash is the same
+  file: src/benchtare/results/store.py
+  find: "int(last[1] == f.sha256)"
+  replace: "int(last[1] != f.sha256)"
+  caught_by:
+    - tests/test_results_store.py::test_each_test_file_says_when_it_was_last_checked
+
+# --- the manifest ------------------------------------------------------------------------------
+
+- id: hash-ignores-content
+  guards: A file's hash changes when its content does
+  file: src/benchtare/results/manifest.py
+  find: "            digest.update(chunk)\n"
+  replace: "            pass\n"
+  caught_by:
+    - tests/test_manifest.py::test_changing_a_file_changes_its_hash
+
+- id: manifest-paths-absolute
+  guards: Manifest paths are relative to the rootdir, so they mean the same on every machine
+  file: src/benchtare/results/manifest.py
+  find: "        return resolved.relative_to(Path(rootdir).resolve()).as_posix()"
+  replace: "        return resolved.as_posix()"
+  caught_by:
+    - tests/test_manifest.py::test_files_are_hashed_with_paths_relative_to_rootdir
+
+- id: file-listed-twice-kept-twice
+  guards: A file listed twice is kept once, with its first role
+  file: src/benchtare/results/manifest.py
+  find: |2
+            if shown in seen:
+                continue
+  replace: ""
+  caught_by:
+    - tests/test_manifest.py::test_a_file_listed_twice_is_kept_once_and_a_missing_file_is_left_out
+
+- id: uncommitted-changes-not-noticed
+  guards: Uncommitted changes in the project's git checkout are recorded
+  file: src/benchtare/results/manifest.py
+  find: "    return commit, None if status is None else bool(status)"
+  replace: "    return commit, False"
+  caught_by:
+    - tests/test_manifest.py::test_uncommitted_changes_are_noticed
+
+- id: ci-variable-value-recorded
+  guards: Environment variable values are never recorded, only which CI system set them
+  file: src/benchtare/results/manifest.py
+  find: |2
+            if environ.get(variable):
+                return name
+  replace: |2
+            if environ.get(variable):
+                return environ[variable]
+  caught_by:
+    - tests/test_manifest.py::test_environment_variable_values_are_never_recorded
+
+- id: conftest-left-out-of-the-manifest
+  guards: The manifest lists the conftest.py files, which can change what a test does
+  file: src/benchtare/plugin.py
+  find: "        files += [(path, CONFTEST) for path in _conftest_files(config)]\n"
+  replace: ""
+  caught_by:
+    - tests/test_results_plugin.py::test_the_manifest_lists_every_file_with_its_role
+
+# --- how a run is stored -----------------------------------------------------------------------
+
+- id: tests-not-stored
+  guards: Each test is stored as soon as it finishes
+  file: src/benchtare/plugin.py
+  find: "            self._store_test(item, stop=False)\n"
+  replace: "            pass\n"
+  caught_by:
+    - tests/test_results_plugin.py::test_each_test_is_stored_with_its_outcome
+    - tests/test_results_plugin.py::test_a_run_that_dies_stays_running_with_the_tests_that_finished
+
+- id: teardown-error-stored-as-passed
+  guards: A test whose teardown failed is stored as an error, as pytest counts it
+  file: src/benchtare/plugin.py
+  find: |2
+        if teardown is not None and teardown.failed:
+            return "error", teardown
+        if call is not None and hasattr(call, "wasxfail"):
+  replace: |2
+        if call is not None and hasattr(call, "wasxfail"):
+  caught_by:
+    - tests/test_results_plugin.py::test_outcomes_follow_pytests_summary
+
+- id: xfail-stored-as-skipped
+  guards: An expected failure is stored as xfailed, not skipped
+  file: src/benchtare/plugin.py
+  find: '            return ("xfailed" if hasattr(call, "wasxfail") else "skipped"), call'
+  replace: '            return "skipped", call'
+  caught_by:
+    - tests/test_results_plugin.py::test_outcomes_follow_pytests_summary
+
+- id: self-test-not-stored
+  guards: The self-test's verdict and checks are stored with the run
+  file: src/benchtare/plugin.py
+  find: "            store.add_selftest(run, result)\n"
+  replace: "            pass\n"
+  caught_by:
+    - tests/test_results_plugin.py::test_the_self_test_and_whatever_ran_before_the_first_test_are_stored
+
+- id: stopped-run-stored-as-finished
+  guards: A run that stopped (a failed self-test, say) is stored as stopped, not finished
+  file: src/benchtare/plugin.py
+  find: "        status = STOPPED if stopped else FINISHED"
+  replace: "        status = FINISHED"
+  caught_by:
+    - tests/test_results_plugin.py::test_a_failed_self_test_stores_a_stopped_run_with_no_tests
+
+- id: no-results-ignored
+  guards: --no-results stores nothing
+  file: src/benchtare/plugin.py
+  find: '    if config.getoption("benchtare_no_results") or config.option.collectonly:'
+  replace: "    if config.option.collectonly:"
+  caught_by:
+    - tests/test_results_plugin.py::test_no_results_stores_nothing
+
+- id: collecting-only-stores-results
+  guards: Collecting only (--collect-only) stores nothing
+  file: src/benchtare/plugin.py
+  find: '    if config.getoption("benchtare_no_results") or config.option.collectonly:'
+  replace: '    if config.getoption("benchtare_no_results"):'
+  caught_by:
+    - tests/test_results_plugin.py::test_collecting_only_stores_nothing
+
+- id: unstorable-run-goes-on
+  guards: A run whose results can't be stored stops, rather than running tests that aren't kept
+  file: src/benchtare/plugin.py
+  find: |2
+                if stop:
+                    self._stop_run()
+  replace: ""
+  caught_by:
+    - tests/test_results_plugin.py::test_a_failure_while_the_bench_opens_is_about_results_not_the_bench
+
+- id: unstorable-test-goes-on
+  guards: A test that can't be stored stops the run, as soon as pytest has reported it
+  file: src/benchtare/plugin.py
+  find: |2
+        def pytest_runtest_logfinish(self) -> None:
+            if self.results_failure is not None:
+                self._stop_run()
+  replace: |2
+        def pytest_runtest_logfinish(self) -> None:
+            pass
+  caught_by:
+    - tests/test_results_plugin.py::test_a_database_held_during_the_run_stops_it_with_a_clear_message
+
+- id: unstored-end-of-run-passes
+  guards: Results that can't be stored at the end of a run fail it, even if every test passed
+  file: src/benchtare/plugin.py
+  find: |2
+            if self.results_failure is not None:
+                # Results that couldn't be stored fail the run, even when every test passed.
+                session.exitstatus = pytest.ExitCode.INTERRUPTED
+  replace: ""
+  caught_by:
+    - tests/test_results_plugin.py::test_results_that_cant_be_stored_at_the_end_fail_the_run

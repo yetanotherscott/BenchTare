@@ -762,7 +762,7 @@ def test_finishing_a_run_stores_its_status_and_counts(store):
 def test_record_entries_keep_their_types_and_numbers_for_trends(store):
     store.start_run(run_info())
     facts = {"endpoint": "io.in1", "unit": None}
-    values = [42, 42.5, True, "run", None, float("nan")]
+    values = [42, 42.5, True, "run", None, float("nan"), float("inf")]
     entries = [
         RecordEntry(
             "read", RecordLevel.RESULTS, f"read {v!r}", {"signal": "X", "value": v, **facts}
@@ -775,7 +775,7 @@ def test_record_entries_keep_their_types_and_numbers_for_trends(store):
         "SELECT seq, test_seq, phase, signal, value, value_num, data FROM record_entries "
         "ORDER BY seq"
     ).fetchall()
-    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7]
+    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8]
     assert [json.loads(row[4]) if row[4] else None for row in rows[:5]] == [
         42,
         42.5,
@@ -783,12 +783,13 @@ def test_record_entries_keep_their_types_and_numbers_for_trends(store):
         "run",
         None,
     ]
-    assert [row[5] for row in rows[:6]] == [42.0, 42.5, 1.0, None, None, None]
+    # SQLite would store NaN as NULL anyway, but it keeps infinity: only finite numbers trend.
+    assert [row[5] for row in rows[:7]] == [42.0, 42.5, 1.0, None, None, None, None]
     assert rows[0][1:4] == (1, "call", "X")
     assert rows[0][6] is None  # nothing left over beyond the columns
-    assert json.loads(rows[6][6]) == {"phase": "call"}
+    assert json.loads(rows[7][6]) == {"phase": "call"}
     store.add_record("run-1", entries[:1], phase="teardown", test_seq=1)
-    assert store.db.execute("SELECT max(seq) FROM record_entries").fetchone()[0] == 8
+    assert store.db.execute("SELECT max(seq) FROM record_entries").fetchone()[0] == 9
 
 
 def test_identity_values_are_numbered_per_item(store):

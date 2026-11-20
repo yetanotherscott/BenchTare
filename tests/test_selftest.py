@@ -5,7 +5,7 @@ a missing DUT, and a simulation that stopped."""
 import pytest
 
 from benchtare import reference
-from benchtare.backends.base import BenchError
+from benchtare.backends.base import BenchError, WriteError
 from benchtare.bench.runtime import open_bench
 from benchtare.selftest import could_not_open, run_selftest
 from benchtare.selftest.checks import BENCH, FAILED, HARNESS, PASSED, SKIPPED
@@ -151,6 +151,22 @@ def test_a_loopback_stuck_at_one_level_is_caught():
     (problem,) = result.problems
     assert problem.detail == (
         "drove False on io.out4, but io.in4 didn't read it back within 1 s; it last read True"
+    )
+
+
+def test_a_loopback_that_raises_an_error_is_caught(monkeypatch):
+    with open_reference() as bench:
+
+        def tripped(binding, value):
+            raise WriteError("io.out4 can't be driven: output stage tripped", hint="the DAQ")
+
+        monkeypatch.setattr(bench.backend("io"), "write", tripped)
+        result = run_selftest(bench)
+    (problem,) = result.problems
+    assert (problem.name, problem.outcome) == ("loopback io.out4 -> io.in4", "failed")
+    assert problem.detail == "io.out4 can't be driven: output stage tripped"
+    assert (
+        problem.hint == "the loopback wire from io.out4 to io.in4 (harness file harness-can.yaml)"
     )
 
 

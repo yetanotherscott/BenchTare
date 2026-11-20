@@ -508,7 +508,7 @@ def test_a_failure_while_the_bench_opens_is_about_results_not_the_bench(project,
         ]
     )
     result.stdout.no_fnmatch_line("*couldn't open the bench*")
-    result.stdout.no_fnmatch_line("*self-test passed*")  # it stopped there, before the self-test
+    result.stdout.no_fnmatch_line("*bench check*")  # it stopped there, before the self-test
     assert query(project, "SELECT status FROM runs") == [("running",)]
     assert query(project, "SELECT count(*) FROM test_results") == [(0,)]
 

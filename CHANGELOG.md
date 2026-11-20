@@ -10,6 +10,13 @@ something you rely on bumps y, and any other release bumps z.
 
 ## [Unreleased]
 
+### Added
+
+- `docs/testing.md`: how BenchTare tests itself, holding its own suite to
+  the standard it asks of a team's tests. Recorded breaks prove each test
+  can fail, and CI runs the whole suite against a slowed reference DUT, so
+  no test's outcome depends on timing.
+
 ## [0.0.2] - 2026-11-16
 
 ### Added

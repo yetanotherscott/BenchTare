@@ -35,6 +35,32 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest
 
+  # Test logic: each recorded break in tests/breaks/ must make the tests it names fail
+  # (docs/testing.md).
+  breaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -m breaks
+
+  # Timing: the whole suite against a reference DUT slowed to a heartbeat every 0.3 s and answers
+  # after 0.6 s, so a test that passes only when values arrive quickly fails here every time
+  # (docs/testing.md). The script checks its change reached what the tests import.
+  slowed-dut:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: python tools/slow_reference_dut.py
+      - run: pytest
+
   # BenchTare is a pytest plugin and promises pytest>=7.4: test that floor, not just the latest.
   oldest-pytest:
     runs-on: ubuntu-latest

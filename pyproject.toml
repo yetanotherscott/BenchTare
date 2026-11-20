@@ -71,6 +71,9 @@ include = ["/src", "/tests", "/docs", "/CHANGELOG.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The recorded breaks are slow, so they run only when asked for: pytest -m breaks.
+addopts = "-m 'not breaks'"
+markers = ["breaks: a recorded break, proving tests can fail (docs/testing.md)"]
 
 [tool.ruff]
 line-length = 100

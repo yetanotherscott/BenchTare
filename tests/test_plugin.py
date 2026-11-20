@@ -369,9 +369,11 @@ def test_the_self_test_does_not_run_when_no_test_uses_the_bench(project):
 
 
 def test_collecting_only_does_not_run_the_self_test(project):
-    result = project.runpytest(*cli(), "--collect-only", "-q")
+    project.makeconftest(CUT_LOOPBACK)  # a self-test would fail, and stop the run
+    result = project.runpytest_subprocess(*cli(), "--collect-only", "-q")
     assert result.ret == pytest.ExitCode.OK
-    assert "self-test" not in result.stdout.str()
+    output = result.stdout.str()
+    assert "bench check" not in output and "harness check" not in output
 
 
 def test_selftest_only_runs_no_tests(project):
@@ -386,6 +388,15 @@ def test_selftest_only_runs_no_tests(project):
         ]
     )
     assert "test_would_fail" not in result.stdout.str()
+
+
+def test_selftest_only_does_not_collect_the_tests(project):
+    # So a test file that can't even be imported doesn't get in the self-test's way.
+    project.makepyfile(test_broken="raise ImportError('this test file is broken')\n")
+    result = project.runpytest(*cli(), "--selftest-only")
+    assert result.ret == pytest.ExitCode.OK
+    result.stdout.fnmatch_lines(["*no tests ran*"])
+    assert "test_broken" not in result.stdout.str()
 
 
 def test_selftest_only_fails_with_exit_code_1(project):
