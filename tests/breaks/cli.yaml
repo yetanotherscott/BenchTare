@@ -1,0 +1,86 @@
+# Breaks for the benchtare command and benchtare init. (The selftest command's own breaks are in
+# selftest.yaml.) Each break takes one behaviour away; every test it names must then fail. See
+# docs/testing.md.
+
+# --- benchtare init ----------------------------------------------------------------------------
+
+- id: init-overwrites-a-file
+  guards: benchtare init never overwrites a file, and writes nothing instead
+  file: src/benchtare/scaffold/__init__.py
+  find: "    if taken:\n"
+  replace: "    if False:\n"
+  caught_by:
+    - tests/test_init.py::test_init_never_overwrites_a_file_and_writes_nothing_instead
+    - tests/test_init.py::test_init_command_refuses_to_overwrite
+
+- id: init-overwrites-a-file-that-appears
+  guards: benchtare init never overwrites a file that appears while it writes
+  file: src/benchtare/scaffold/__init__.py
+  find: 'with path.open("xb") as file:'
+  replace: 'with path.open("wb") as file:'
+  caught_by:
+    - tests/test_init.py::test_init_never_overwrites_a_file_that_appears_while_it_writes
+
+- id: init-into-a-file
+  guards: benchtare init refuses a file given as the folder, saying so
+  file: src/benchtare/scaffold/__init__.py
+  find: "    if target.exists() and not target.is_dir():"
+  replace: "    if False:"
+  caught_by:
+    - tests/test_init.py::test_init_refuses_a_file_given_as_the_folder
+
+- id: init-copies-what-a-run-left
+  guards: Only the quickstart's own files are copied, not folders or hidden files a run left
+  file: src/benchtare/scaffold/__init__.py
+  find: '        if entry.is_file() and not entry.name.startswith(".")'
+  replace: "        if entry.is_file()"
+  caught_by:
+    - tests/test_init.py::test_only_the_quickstarts_files_are_copied_not_what_a_run_left_there
+
+- id: init-failure-exits-0
+  guards: benchtare init exits 1 when it wrote nothing
+  file: src/benchtare/cli.py
+  find: |2
+            print(f"benchtare init: {exc}", file=sys.stderr)
+            return 1
+  replace: |2
+            print(f"benchtare init: {exc}", file=sys.stderr)
+            return 0
+  caught_by:
+    - tests/test_init.py::test_init_command_refuses_to_overwrite
+
+- id: init-takes-other-options
+  guards: benchtare init takes only a folder
+  file: src/benchtare/cli.py
+  find: |2
+            if rest:
+                parser.error(f"init takes only a folder, not {' '.join(rest)}")
+  replace: ""
+  caught_by:
+    - tests/test_init.py::test_init_command_takes_only_a_folder
+
+# --- the other commands ------------------------------------------------------------------------
+
+- id: check-tests-command-runs-only-the-tests
+  guards: benchtare check-tests runs the test check, not only the tests
+  file: src/benchtare/cli.py
+  find: 'pytest.main(["--check-tests", "-p", "no:cacheprovider", *rest])'
+  replace: 'pytest.main(["-p", "no:cacheprovider", *rest])'
+  caught_by:
+    - tests/test_cli.py::test_check_tests_exits_1_when_a_test_cant_fail
+
+- id: check-hygiene-command-runs-only-the-tests
+  guards: benchtare check-hygiene runs the hygiene check, not only the tests
+  file: src/benchtare/cli.py
+  find: 'pytest.main(["--check-hygiene", "-p", "no:cacheprovider", *rest])'
+  replace: 'pytest.main(["-p", "no:cacheprovider", *rest])'
+  caught_by:
+    - tests/test_cli.py::test_check_hygiene_exits_1_when_a_test_isnt_clean
+
+- id: command-not-required
+  guards: benchtare needs a command
+  file: src/benchtare/cli.py
+  find: 'commands = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)'
+  replace: 'commands = parser.add_subparsers(dest="command", metavar="COMMAND")'
+  caught_by:
+    - tests/test_cli.py::test_a_command_is_required

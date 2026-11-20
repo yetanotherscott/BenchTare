@@ -132,8 +132,11 @@ git checkout src/benchtare/reference/device.py
 
 What isn't covered yet, so the gaps are visible rather than hidden:
 
-- **Recorded breaks cover only some of BenchTare so far.** The table below
-  lists each area. The rest of the first slice is being covered area by area.
+- **Recorded breaks cover every area, but not every line.** Each area's
+  breaks take away the behaviours its tests are there to guard. Code that no
+  behaviour depends on, such as a check that another check always makes
+  first, may have no break; a break written for it would survive, and show
+  that.
 - **Breaks and the slowed DUT run only on Linux.** The usual suite runs on all
   three systems.
 - **Test order isn't checked.** The suite always runs in the same order, so a
@@ -155,4 +158,4 @@ What isn't covered yet, so the gaps are visible rather than hidden:
 | The pytest plugin and the test record | `tests/breaks/plugin.yaml` | Yes |
 | The hygiene check | `tests/breaks/hygiene.yaml` | Yes |
 | The test check | `tests/breaks/testcheck.yaml` | Yes |
-| The CLI and `benchtare init` | | Not yet |
+| The CLI and `benchtare init` | `tests/breaks/cli.yaml` | Yes |
