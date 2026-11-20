@@ -153,6 +153,6 @@ What isn't covered yet, so the gaps are visible rather than hidden:
 | Backends, the read rule and `wait_until` | `tests/breaks/backends.yaml` | Yes |
 | The reference DUT and DUT models | `tests/breaks/dut.yaml` | Yes |
 | The pytest plugin and the test record | | Not yet |
-| The hygiene check | | Not yet |
+| The hygiene check | `tests/breaks/hygiene.yaml` | Yes |
 | The test check | `tests/breaks/testcheck.yaml` | Yes |
 | The CLI and `benchtare init` | | Not yet |

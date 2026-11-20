@@ -1,0 +1,157 @@
+# Breaks for the hygiene check: its three rules (it repeats, it leaves the DUT clean, it starts
+# from a meaningful state) and its verdict. Each break takes one behaviour away; every test it
+# names must then fail. See docs/testing.md.
+
+# --- comparing an item -------------------------------------------------------------------------
+
+- id: tolerance-ignored
+  guards: Two numbers within an item's tolerance are the same
+  file: src/benchtare/hygiene.py
+  find: "        return abs(after - before) <= tolerance"
+  replace: "        return after == before"
+  caught_by:
+    - tests/test_hygiene.py::test_same[42.0-42.05-0.1-True]
+
+- id: tolerance-stretches-bools
+  guards: A tolerance never makes True and False the same, though Python counts them as numbers
+  file: src/benchtare/hygiene.py
+  find: "    return isinstance(value, numbers.Real) and not isinstance(value, bool)"
+  replace: "    return isinstance(value, numbers.Real)"
+  caught_by:
+    - tests/test_hygiene.py::test_same[True-False-1.0-False]
+
+- id: settle-time-ignored
+  guards: An item has its settle time to come back after teardown
+  file: src/benchtare/hygiene.py
+  find: |2
+            remaining = deadline - clock()
+            if remaining <= 0:
+                return False, value
+  replace: |2
+            return False, value
+  caught_by:
+    - tests/test_hygiene.py::test_a_value_that_comes_back_within_its_settle_time_is_the_same
+
+# --- leaving the DUT clean ---------------------------------------------------------------------
+
+- id: dirty-at-its-clean-value-passes
+  guards: A test that leaves an item away from its clean value is blamed
+  file: src/benchtare/hygiene.py
+  find: |2
+            if back:
+                note = (
+  replace: |2
+            if True:
+                note = (
+  caught_by:
+    - tests/test_hygiene.py::test_with_a_clean_value_a_test_that_leaves_it_dirty_is_blamed
+    - tests/test_check_hygiene.py::test_a_test_that_leaves_an_input_dirty_is_not_clean
+
+- id: inherited-mess-blamed
+  guards: Only the test that left an item dirty is blamed, not one that found it so
+  file: src/benchtare/hygiene.py
+  find: "        if dirty_before and same(before, after, tolerance):"
+  replace: "        if False:"
+  caught_by:
+    - tests/test_hygiene.py::test_with_a_clean_value_a_test_that_finds_it_dirty_and_leaves_it_isnt_blamed
+    - tests/test_check_hygiene.py::test_only_the_test_that_left_a_mess_is_blamed
+
+- id: changed-item-passes
+  guards: Without a clean value, an item not back where it was before setup is blamed
+  file: src/benchtare/hygiene.py
+  find: |2
+        back, after = come_back(read, before, item, clock=clock, sleep=sleep)
+        if back:
+  replace: |2
+        back, after = come_back(read, before, item, clock=clock, sleep=sleep)
+        if True:
+  caught_by:
+    - tests/test_hygiene.py::test_without_a_clean_value_a_change_is_blamed
+    - tests/test_check_hygiene.py::test_without_a_clean_value_an_item_is_compared_before_and_after
+
+- id: putting-back-the-sessions-start-blamed
+  guards: Without a clean value, putting an item back how the session first found it is clean
+  file: src/benchtare/hygiene.py
+  find: |2
+        if (
+            reference is not MISSING
+  replace: |2
+        if (
+            False
+  caught_by:
+    - tests/test_hygiene.py::test_without_a_clean_value_putting_back_how_the_session_found_it_is_clean
+
+# --- repeating, and a meaningful start ---------------------------------------------------------
+
+- id: failing-repeat-passes
+  guards: A test that fails when run again straight after itself doesn't repeat
+  file: src/benchtare/plugin.py
+  find: |2-
+        if not call.passed:
+            return result(
+                hygiene.FAILED,
+  replace: |2-
+        if False:
+            return result(
+                hygiene.FAILED,
+  caught_by:
+    - tests/test_check_hygiene.py::test_a_test_that_doesnt_repeat_is_not_clean
+
+- id: repeat-readings-not-compared
+  guards: A test that takes other readings when run again doesn't repeat
+  file: src/benchtare/plugin.py
+  find: "    if again != first:"
+  replace: "    if False:"
+  caught_by:
+    - tests/test_check_hygiene.py::test_a_test_that_takes_different_readings_when_repeated_is_not_clean
+
+- id: wait-already-satisfied-not-noted
+  guards: A wait already satisfied by the value from before its write is noted
+  file: src/benchtare/bench/runtime.py
+  find: |2
+            if already:
+                signal, where = self.last_write
+  replace: |2
+            if False:
+                signal, where = self.last_write
+  caught_by:
+    - tests/test_hygiene.py::test_a_wait_already_satisfied_before_the_write_is_noted
+    - tests/test_check_hygiene.py::test_a_wait_already_satisfied_before_its_write_is_not_a_meaningful_start
+
+- id: unchecked-wait-judged
+  guards: A wait marked check=False isn't judged for a meaningful start
+  file: src/benchtare/bench/runtime.py
+  find: "        if before is None or self.last_write is None or not reading.checked:"
+  replace: "        if before is None or self.last_write is None:"
+  caught_by:
+    - tests/test_hygiene.py::test_a_wait_already_satisfied_before_the_write_is_noted
+
+- id: meaningful-start-ignores-the-repeat
+  guards: A meaningful start is judged on the repeat too, where the test starts from its own end
+  file: src/benchtare/plugin.py
+  find: "        waits = [(run, r) for run, taken in ((1, first), (2, repeat)) for r in taken]"
+  replace: "        waits = [(run, r) for run, taken in ((1, first),) for r in taken]"
+  caught_by:
+    - tests/test_check_hygiene.py::test_a_staging_without_its_own_starting_point_shows_on_the_repeat
+
+# --- the verdict -------------------------------------------------------------------------------
+
+- id: broken-rule-still-clean
+  guards: A test that breaks any checked rule isn't clean
+  file: src/benchtare/hygiene.py
+  find: |2
+        if any(rule.outcome == FAILED for rule in rules):
+            return NOT_CLEAN
+  replace: ""
+  caught_by:
+    - tests/test_hygiene.py::test_the_verdict[passed-outcomes2-not clean]
+    - tests/test_hygiene.py::test_the_verdict[passed-outcomes3-not clean]
+    - tests/test_hygiene.py::test_the_verdict[passed-outcomes4-not clean]
+
+- id: unclean-test-passes-the-check
+  guards: A test that isn't clean fails the hygiene check, even though every test passed
+  file: src/benchtare/plugin.py
+  find: "        unclean = any(test.verdict == hygiene.NOT_CLEAN for test in self.hygiene_checked)"
+  replace: "        unclean = False"
+  caught_by:
+    - tests/test_cli.py::test_check_hygiene_exits_1_when_a_test_isnt_clean

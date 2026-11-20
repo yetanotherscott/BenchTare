@@ -201,14 +201,15 @@ def test_undefined_enum_code_can_be_sent_as_a_raw_number(can_bench):
     can_bench.wait_until(signals.Mode, "standby", timeout=2.0)
     can_bench.write(signals.ModeRequest, 3)  # not a defined value: the DUT should ignore it
     # Its next five heartbeats all say standby. Counting heartbeats, not seconds, keeps this
-    # true on a runner too slow to deliver any within a short wait.
+    # true on a runner too slow to deliver any within a short wait. Not a check, so the count
+    # starts after the write: a checked wait also calls its function on the value from before.
     heartbeats = []
 
     def fifth(mode):
         heartbeats.append(mode)
         return len(heartbeats) == 5
 
-    can_bench.wait_until(signals.Mode, fifth, timeout=2.0)
+    can_bench.wait_until(signals.Mode, fifth, timeout=2.0, check=False)
     assert heartbeats == ["standby"] * 5
 
 

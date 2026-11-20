@@ -17,6 +17,13 @@ something you rely on bumps y, and any other release bumps z.
   can fail, and CI runs the whole suite against a slowed reference DUT, so
   no test's outcome depends on timing.
 
+### Changed
+
+- The documentation now says that a function given to `wait_until` is also
+  called once on the value from before the write, to tell whether the DUT
+  was already there (the hygiene check's meaningful start), so it should
+  have no side effects; `check=False` leaves that call out.
+
 ## [0.0.2] - 2026-11-16
 
 ### Added

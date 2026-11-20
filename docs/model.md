@@ -286,7 +286,7 @@ The `bench` fixture provides:
 | Call | What it does |
 | --- | --- |
 | `bench.write(signal, value)` | Drive a DUT input |
-| `bench.wait_until(signal, expected, timeout)` | Wait for a value of the signal, received after the bench's most recent write, that equals `expected` (`pytest.approx` works), or for which `expected` returns true if it is a function. Returns that value. **Use this to check how the DUT reacts** |
+| `bench.wait_until(signal, expected, timeout)` | Wait for a value of the signal, received after the bench's most recent write, that equals `expected` (`pytest.approx` works), or for which `expected` returns true if it is a function. Returns that value. **Use this to check how the DUT reacts**. A function is also called once on the value from before the write, to tell whether the DUT was already there (the hygiene check's meaningful start), so give it one without side effects; `check=False` leaves that out |
 | `bench.read(signal, timeout)` | Return the first value of the signal received after the bench's most recent write, waiting up to `timeout` seconds. A value from before the write is never returned, and a fast reply is never missed |
 
 Each `read` and `wait_until` in a test is one of its verification steps, and the
