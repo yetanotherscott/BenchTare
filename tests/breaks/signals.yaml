@@ -1,0 +1,195 @@
+# Breaks for signals and the interface description: what a signal may be, and how one file per
+# DUT describes them, inline and from DBC files. Each break takes one behaviour away; every test
+# it names must then fail. See docs/testing.md.
+
+# --- a signal ----------------------------------------------------------------------------------
+
+- id: enum-without-values-accepted
+  guards: An enum signal must list its values
+  file: src/benchtare/signals/model.py
+  find: |2
+                if not self.values:
+                    raise SignalError(
+                        "enum signal has no values",
+  replace: |2
+                if False:
+                    raise SignalError(
+                        "enum signal has no values",
+  caught_by:
+    - tests/test_signals.py::TestSignal::test_enum_needs_values
+
+- id: repeated-enum-value-accepted
+  guards: An enum value can't be listed twice
+  file: src/benchtare/signals/model.py
+  find: "            if duplicates:"
+  replace: "            if False:"
+  caught_by:
+    - tests/test_signals.py::TestSignal::test_enum_values_must_be_unique
+
+- id: values-on-a-number-accepted
+  guards: Only an enum signal has values
+  file: src/benchtare/signals/model.py
+  find: "        elif self.values:"
+  replace: "        elif False:"
+  caught_by:
+    - tests/test_signals.py::TestSignal::test_only_enums_have_values
+
+- id: blank-unit-accepted
+  guards: A unit can't be blank
+  file: src/benchtare/signals/model.py
+  find: "(not isinstance(self.unit, str) or not self.unit.strip())"
+  replace: "(not isinstance(self.unit, str))"
+  caught_by:
+    - tests/test_signals.py::TestSignal::test_blank_or_non_text_unit_is_rejected[]
+    - tests/test_signals.py::TestSignal::test_blank_or_non_text_unit_is_rejected[  ]
+
+- id: keyword-name-accepted
+  guards: A signal can't be named with a Python keyword, since tests write signals.<name>
+  file: src/benchtare/signals/model.py
+  find: "not name.isidentifier() or keyword.iskeyword(name):"
+  replace: "not name.isidentifier():"
+  caught_by:
+    - tests/test_signals.py::TestSignal::test_name_must_be_usable_as_attribute[class]
+
+- id: reserved-name-accepted
+  guards: A signal can't take a name SignalSet already uses, such as items
+  file: src/benchtare/signals/model.py
+  find: '    if name.startswith("_") or name in RESERVED_NAMES:'
+  replace: '    if name.startswith("_"):'
+  caught_by:
+    - tests/test_signals.py::TestSignal::test_reserved_names_are_rejected[items]
+    - tests/test_signals.py::TestSignal::test_reserved_names_are_rejected[get]
+    - tests/test_signals.py::TestSignal::test_reserved_names_are_rejected[keys]
+
+- id: signal-defined-twice-accepted
+  guards: A DUT can't have two signals of the same name
+  file: src/benchtare/signals/model.py
+  find: "            if existing is not None:"
+  replace: "            if False:"
+  caught_by:
+    - tests/test_signals.py::TestSignalSet::test_duplicate_name_is_rejected_naming_both_sources
+
+- id: unknown-signal-without-suggestion
+  guards: A misspelt signal name suggests the names close to it
+  file: src/benchtare/signals/model.py
+  find: |2-
+            if close:
+                message += f"; did you mean
+  replace: |2-
+            if False:
+                message += f"; did you mean
+  caught_by:
+    - tests/test_signals.py::TestSignalSet::test_unknown_attribute_suggests_close_names
+
+# --- signals from DBC files --------------------------------------------------------------------
+
+- id: dut-sent-signal-is-an-input
+  guards: A signal the DUT's node sends is a DUT output
+  file: src/benchtare/dut/description.py
+  find: |2
+                if sent_by_dut:
+                    direction = Direction.OUTPUT
+  replace: |2
+                if sent_by_dut:
+                    direction = Direction.INPUT
+  caught_by:
+    - tests/test_interface_description.py::test_direction_comes_from_dbc_nodes
+
+- id: signals-the-dut-doesnt-use-imported
+  guards: Signals the DUT's node neither sends nor receives aren't imported
+  file: src/benchtare/dut/description.py
+  find: "            elif node in dbc_signal.receivers:"
+  replace: "            elif True:"
+  caught_by:
+    - tests/test_interface_description.py::test_dbc_only
+    - tests/test_interface_description.py::test_direction_comes_from_dbc_nodes
+
+- id: dbc-choices-ignored
+  guards: A DBC signal with named values is an enum
+  file: src/benchtare/dut/description.py
+  find: "    if dbc_signal.choices:"
+  replace: "    if False:"
+  caught_by:
+    - tests/test_interface_description.py::test_dbc_only
+
+- id: scaled-dbc-signal-is-an-int
+  guards: A DBC signal with a fractional scale or offset is a float
+  file: src/benchtare/dut/description.py
+  find: "    if dbc_signal.is_float or scaled:"
+  replace: "    if dbc_signal.is_float:"
+  caught_by:
+    - tests/test_interface_description.py::test_dbc_only
+
+- id: one-bit-dbc-signal-is-an-int
+  guards: A one-bit DBC signal with no scale or offset is a bool
+  file: src/benchtare/dut/description.py
+  find: "    if dbc_signal.length == 1 and dbc_signal.scale == 1 and dbc_signal.offset == 0:"
+  replace: "    if False:"
+  caught_by:
+    - tests/test_interface_description.py::test_dbc_only
+
+# --- the file as a whole -----------------------------------------------------------------------
+
+- id: override-direction-ignored
+  guards: An override changes an imported signal's direction
+  file: src/benchtare/dut/description.py
+  find: |2
+                if direction is not None:
+                    target.direction = direction
+  replace: |2
+                if False:
+                    target.direction = direction
+  caught_by:
+    - tests/test_interface_description.py::test_overrides_change_direction_unit_and_name
+
+- id: override-rename-ignored
+  guards: An override renames an imported signal
+  file: src/benchtare/dut/description.py
+  find: "                target.name = new_name\n"
+  replace: "                pass\n"
+  caught_by:
+    - tests/test_interface_description.py::test_overrides_change_direction_unit_and_name
+
+- id: numeric-signal-without-unit-accepted
+  guards: A number signal must declare its unit, or none, so a forgotten unit is caught
+  file: src/benchtare/dut/description.py
+  find: "        if candidate.type in NUMERIC_TYPES and not candidate.unit_declared:"
+  replace: "        if False:"
+  caught_by:
+    - tests/test_interface_description.py::test_inline_numeric_signal_without_unit_is_rejected
+    - tests/test_interface_description.py::test_dbc_signal_without_unit_hints_at_overrides
+
+- id: duplicate-across-sources-not-named
+  guards: A name defined twice, inline and in a DBC, names both places
+  file: src/benchtare/dut/description.py
+  find: |2
+            if first is not None:
+                problems.append(_duplicate_problem(first, candidate))
+                continue
+  replace: ""
+  caught_by:
+    - tests/test_interface_description.py::test_duplicate_name_across_sources_names_both_places
+
+- id: standards-accepted
+  guards: A standard such as J1939 is refused, as not available in this version
+  file: src/benchtare/dut/description.py
+  find: "    for standard in standards:\n"
+  replace: "    for standard in []:\n"
+  caught_by:
+    - tests/test_interface_description.py::test_standards_are_rejected_for_now
+
+- id: only-the-first-problem-reported
+  guards: Every problem in the file is reported together, not one per run
+  file: src/benchtare/dut/description.py
+  find: "        raise ConfigError(path, problems, kind=KIND)\n\n    can_signals"
+  replace: "        raise ConfigError(path, problems[:1], kind=KIND)\n\n    can_signals"
+  caught_by:
+    - tests/test_interface_description.py::test_all_problems_are_reported_together
+
+- id: dut-without-signals-accepted
+  guards: A DUT with no signals at all is refused
+  file: src/benchtare/dut/description.py
+  find: "    if not problems and not signals:"
+  replace: "    if False:"
+  caught_by:
+    - tests/test_interface_description.py::test_no_signals_at_all
