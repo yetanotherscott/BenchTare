@@ -1,0 +1,143 @@
+# Breaks for the bench file and the harness file: what each may say, and what the harness file
+# is checked against before anything runs. Each break takes one behaviour away; every test it
+# names must then fail. See docs/testing.md.
+
+# --- the bench file ----------------------------------------------------------------------------
+
+- id: bench-unknown-key-accepted
+  guards: A bench file with a key it doesn't know (such as connections) is refused
+  file: src/benchtare/bench/config.py
+  find: "        if key not in _TOP_KEYS:"
+  replace: "        if False:"
+  caught_by:
+    - tests/test_bench_file.py::test_bench_file_names_no_signals
+
+- id: equipment-name-with-a-dot-accepted
+  guards: An equipment name can't contain a dot or a space, since harness files write equipment.channel
+  file: src/benchtare/bench/config.py
+  find: '    if not item_id or "." in item_id or not all(c.isalnum() or c in "_-" for c in item_id):'
+  replace: "    if not item_id:"
+  caught_by:
+    - tests/test_bench_file.py::test_equipment_names_cannot_contain_dots_or_spaces
+
+# --- the harness file: each connection ---------------------------------------------------------
+
+- id: dut-input-on-a-read-only-channel
+  guards: A DUT input must be on a channel the bench can drive
+  file: src/benchtare/harness/config.py
+  find: "        if drive and not caps.drive:"
+  replace: "        if False:"
+  caught_by:
+    - tests/test_harness_file.py::test_dut_input_on_read_only_channel_is_rejected
+    - tests/test_harness_file.py::test_loopback_must_drive_a_drivable_channel
+
+- id: dut-output-on-a-drive-only-channel
+  guards: A DUT output must be on a channel the bench can read
+  file: src/benchtare/harness/config.py
+  find: "        if not drive and not caps.read:"
+  replace: "        if False:"
+  caught_by:
+    - tests/test_harness_file.py::test_dut_output_on_drive_only_channel_is_rejected
+
+- id: channel-used-twice
+  guards: A channel carries one signal or one loopback end
+  file: src/benchtare/harness/config.py
+  find: "        if key in self.used_channels:"
+  replace: "        if False:"
+  caught_by:
+    - tests/test_harness_file.py::test_channel_used_twice_is_rejected
+    - tests/test_harness_file.py::test_loopback_cannot_reuse_a_signal_channel
+
+- id: bus-claimed-like-a-channel
+  guards: Many signals may share a bus
+  file: src/benchtare/harness/config.py
+  find: |2
+            if endpoint.channel is None:
+                return True
+            key = str(endpoint)
+  replace: |2
+            key = str(endpoint)
+  caught_by:
+    - tests/test_harness_file.py::test_many_signals_may_share_a_bus
+
+- id: channel-on-a-bus-accepted
+  guards: A bus has no channels, so equipment.channel on a bus is refused
+  file: src/benchtare/harness/config.py
+  find: |2
+                if channel:
+                    self.problems.append(
+                        Problem(
+                            f"'{equipment_id}' is a bus, which has no channels",
+  replace: |2
+                if False:
+                    self.problems.append(
+                        Problem(
+                            f"'{equipment_id}' is a bus, which has no channels",
+  caught_by:
+    - tests/test_harness_file.py::test_channel_on_a_bus_is_rejected
+
+- id: inline-signal-on-a-can-bus
+  guards: A signal that doesn't come from a DBC can't go on a CAN bus, since no frame carries it
+  file: src/benchtare/harness/config.py
+  find: '            if equipment.kind == "bus" and name not in self.description.can_signals:'
+  replace: "            if False:"
+  caught_by:
+    - tests/test_harness_file.py::test_signal_without_dbc_cannot_go_on_a_can_bus
+
+- id: multiplexed-input-on-a-bus
+  guards: A DUT input in a multiplexed message is refused on a bus, which can't write it yet
+  file: src/benchtare/harness/config.py
+  find: "        if ref.multiplexed and signal.direction is Direction.INPUT:"
+  replace: "        if False:"
+  caught_by:
+    - tests/test_input_sanity.py::test_multiplexed_dut_input_on_a_bus_is_rejected
+
+- id: fd-message-on-a-classic-bus
+  guards: A signal in a CAN FD message is refused on a bus that isn't in FD mode
+  file: src/benchtare/harness/config.py
+  find: "        if ref.fd and not _carries_fd(equipment):"
+  replace: "        if False:"
+  caught_by:
+    - tests/test_input_sanity.py::test_fd_message_on_a_classic_bus_is_rejected
+
+# --- the harness file: loopbacks and presence checks -------------------------------------------
+
+- id: loopback-on-a-bus
+  guards: A loopback connects two channels, never a bus
+  file: src/benchtare/harness/config.py
+  find: "            if drive.channel is None or read.channel is None:"
+  replace: "            if False:"
+  caught_by:
+    - tests/test_harness_file.py::test_loopback_cannot_use_a_bus
+
+- id: presence-on-a-dut-input
+  guards: A presence check on a signal needs a DUT output, a value the DUT sends
+  file: src/benchtare/harness/config.py
+  find: "                if signal.direction is not Direction.OUTPUT:"
+  replace: "                if False:"
+  caught_by:
+    - tests/test_harness_file.py::test_presence_signal_must_be_a_connected_output
+
+- id: presence-on-an-unconnected-signal
+  guards: A presence check's signal must be connected in the harness
+  file: src/benchtare/harness/config.py
+  find: "                if name not in connections or signal is None:"
+  replace: "                if signal is None:"
+  caught_by:
+    - tests/test_harness_file.py::test_presence_signal_must_be_a_connected_output
+
+- id: presence-on-equipment-that-isnt-a-bus
+  guards: A presence check on a bus names a bus, not channel equipment
+  file: src/benchtare/harness/config.py
+  find: '                if equipment is None or equipment.kind != "bus":'
+  replace: "                if equipment is None:"
+  caught_by:
+    - tests/test_harness_file.py::test_presence_bus_must_be_a_bus
+
+- id: presence-within-zero
+  guards: A presence check waits a time above 0
+  file: src/benchtare/harness/config.py
+  find: "or not isinstance(within, (int, float)) or within <= 0:"
+  replace: "or not isinstance(within, (int, float)) or within < 0:"
+  caught_by:
+    - tests/test_harness_file.py::test_presence_needs_a_positive_time

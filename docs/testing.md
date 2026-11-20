@@ -144,7 +144,7 @@ What isn't covered yet, so the gaps are visible rather than hidden:
 | Self-test: the bench and harness checks, and how a run uses them | `tests/breaks/selftest.yaml` | Yes |
 | Results: the database, its schema and migrations, the manifest, and how a run is stored | `tests/breaks/results.yaml` | Yes |
 | Signals and the interface description | `tests/breaks/signals.yaml` | Yes |
-| The bench and harness files | | Not yet |
+| The bench and harness files | `tests/breaks/files.yaml` | Yes |
 | Backends, the read rule and `wait_until` | | Not yet |
 | The reference DUT and DUT models | | Not yet |
 | The pytest plugin and the test record | | Not yet |
